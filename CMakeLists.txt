@@ -15,7 +15,7 @@ link_directories(${STAGE_LIBRARY_DIRS})
 set(PLUGIN_NAME mybot)
 
 # create a library module for each plugin and link libstage to each
-ADD_LIBRARY(${PLUGIN_NAME} MODULE src/my_bot.cpp)
+ADD_LIBRARY(${PLUGIN_NAME} MODULE src/my_bot.cpp src/pid.cpp)
 TARGET_LINK_LIBRARIES(${PLUGIN_NAME} ${STAGE_LIBRARIES})
 
 

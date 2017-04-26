@@ -1,6 +1,5 @@
 #include <limits> include <vector> include <iostream> include <cassert>
 #include <algorithm>
-#include <cmath>
 #include "pid.h"
 
 #include "my_bot.h"
@@ -8,7 +7,7 @@
 
 using namespace Stg;
 
-static const double followdist = 1.4;
+static const double followdist = 1;
 static const double cruisespeed = 0.4;
 static const double avoidspeed = 0.05;
 static const double avoidturn = 0.5;
@@ -16,20 +15,16 @@ static const double minfrontdistance = 1.0; // 0.6
 static const double stopdist = 0.3;
 static const int avoidduration = 10;
 static const int maxblobx = 79;
-static bool isahead = true;
 typedef struct {
   ModelPosition *pos;
   ModelRanger *laser;
   ModelBlobfinder *blob;
-  double lastposeother;
   int state; // 1 means blob detected, 0 not detected
-  PID pidcruse;
-  PID pidturn;
+  // PID pidcruse;
+  // PID pidturn;
   int avoidcount, randcount;
 } robot_t;
 
-
-int counter = 0;
 int BlobUpdate(Model *, robot_t *robot);
 int LaserUpdate(Model *mod, robot_t *robot);
 
@@ -47,16 +42,8 @@ extern "C" int Init(Model *mod, CtrlArgs *)
   robot_t *robot = new robot_t();
 
   // robot->pidcruse = PID(cruisespeed, -cruisespeed, 0.1, 0.01, 0.5);
-  if (isahead){
-    robot->pidturn.set(avoidturn, -avoidturn, 0.04, 0.0005, 0.000);
-    robot->pidcruse.set( cruisespeed,0 , cruisespeed*4, 0.001, 0.001);
-  }
-  else {
-    robot->pidturn.set(avoidturn, -avoidturn, 0.04, 0.0005, 0.000);
-    robot->pidcruse.set(0, cruisespeed, cruisespeed*4, 0.001, 0.001);
-  }
+  // robot->pidturn = PID(avoidturn, -avoidturn, 0.1, 0.01, 0.5);
   robot->avoidcount = 0;
-  robot->lastposeother = 0;
   robot->randcount = 0;
   robot->state = 0;
   robot->pos = dynamic_cast<ModelPosition *>(mod);
@@ -90,9 +77,8 @@ extern "C" int Init(Model *mod, CtrlArgs *)
 
 int BlobUpdate(Model *, robot_t *robot)
 {
-  counter++;
   // no blob
-  if (!robot->blob->GetBlobs().size() ){
+  if (!robot->blob->GetBlobs().size()){
     robot->state = 0;
     return 0;
   }
@@ -101,34 +87,26 @@ int BlobUpdate(Model *, robot_t *robot)
   int centerPointX = (robot->blob->GetBlobs()[0].left + robot->blob->GetBlobs()[0].right) /2;
   std::cout << centerPointX <<  " " << robot->blob->GetBlobs()[0].range<< std::endl;
   
-  //set turn speed'
-  robot->pos->SetTurnSpeed(
-    robot->pidturn.calculate( maxblobx /2,  centerPointX , 0.1 )
-  );
-
-  robot->lastposeother = centerPointX ;
-  // if (centerPointX < maxblobx /2 ){ 
-  //   std::cout << "left" << std::endl;
-  //   robot->pos->SetTurnSpeed((avoidturn/10.0)*(maxblobx /2 - centerPointX));
-  // }
-  // else if (centerPointX > maxblobx /2 ){ 
-  //   std::cout << "right" << std::endl;
-  //   robot->pos->SetTurnSpeed(-(avoidturn/10.0)*(centerPointX-maxblobx /2 ));
-  // }
-  // else{
-  //   robot->pos->SetTurnSpeed(0);
-  // }
+  //set turn speed
+  if (centerPointX < maxblobx /2 ){ 
+    std::cout << "left" << std::endl;
+    robot->pos->SetTurnSpeed((avoidturn/10.0)*(maxblobx /2 - centerPointX));
+  }
+  else if (centerPointX > maxblobx /2 ){ 
+    std::cout << "right" << std::endl;
+    robot->pos->SetTurnSpeed(-(avoidturn/10.0)*(centerPointX-maxblobx /2 ));
+  }
+  else{
+    robot->pos->SetTurnSpeed(0);
+  }
   // set forward speed
-  // if (robot->blob->GetBlobs()[0].range >  followdist){
-    robot->pos->SetXSpeed(
-    robot->pidcruse.calculate(followdist ,robot->blob->GetBlobs()[0].range, 0.1 )
-    );
-    // robot->pos->SetXSpeed((cruisespeed*4)*( robot->blob->GetBlobs()[0].range) - followdist);
-  // }
-  // else{
-  //   std::cout << "speed 0" << std::endl;
-  //   robot->pos->SetXSpeed(0);
-  // }
+  if (robot->blob->GetBlobs()[0].range >  followdist){
+    robot->pos->SetXSpeed(cruisespeed);
+  }
+  else{
+    std::cout << "speed 0" << std::endl;
+    robot->pos->SetXSpeed(0);
+  }
 
   return 0; // run again
 }

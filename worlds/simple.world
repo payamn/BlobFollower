@@ -17,9 +17,9 @@ resolution 0.02
 window
 (
   size [ 635 666 ] # in pixels
-  scale 36.995   # pixels per meter
-  center [ -4.911  -0.743 ]
-  rotate [ 1.000  6.000 ]
+  scale 27.795   # pixels per meter
+  center [ 1.210  0.622 ]
+  rotate [ 0.000  0.000 ]
   			
   show_data 1              # 1=on 0=off
 )
@@ -30,7 +30,7 @@ floorplan
   name "cave"
   size [16.000 16.000 0.800]
   pose [0.000 0.000 0.000 0.000]
-  bitmap "bitmaps/simpleroad.png"
+  bitmap "bitmaps/simpleroad2.png"
 )
 
 
@@ -39,7 +39,7 @@ pioneer2dx
   color "red"
   # can refer to the robot by this name
   name "r0"
-  pose [ -4.362 -4.685 0.000 7.758 ] 
+  pose [ 3.599 -0.581 0.000 81.485 ] 
 
   # pioneer2dx's sonars will be ranger:0 and the laser will be ranger:1
   sicklaser( pose [ 0.000 0.000 0.000 0.000 ] ) 
@@ -50,7 +50,7 @@ pioneer2dx
 
   # report error-free position in world coordinates
    blobfinder( 
-      pose [0.000 0.000 0.000 0.000]
+      pose [0.000 0.000 0.000 180.000]
       colors_count 6 
       name "blob"
       colors [ "red" "blue" "green" "cyan" "yellow" "magenta" ]  
@@ -64,7 +64,7 @@ pioneer2dx
   color "red"
   # can refer to the robot by this name
   name "r1"
-  pose [ -6.580 -4.487 0.000 -9.431 ] 
+  pose [ 3.992 -2.189 0.000 80.289 ] 
 
   # pioneer2dx's sonars will be ranger:0 and the laser will be ranger:1
   sicklaser( pose [ 0.000 0.000 0.000 0.000 ] ) 
