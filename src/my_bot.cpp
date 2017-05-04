@@ -97,10 +97,22 @@ int BlobUpdate(Model *, robot_t *robot)
     return 0;
   }
   robot->state = 1;
-
+  double range = robot->blob->GetBlobs()[0].range;
   int centerPointX = (robot->blob->GetBlobs()[0].left + robot->blob->GetBlobs()[0].right) /2;
-  std::cout << centerPointX <<  " " << robot->blob->GetBlobs()[0].range<< std::endl;
+  double degree = -asin(1.0 / sqrt(3) * (2.0 * centerPointX / 79 - 1));
+
+  std::cout <<  maxblobx /2 - centerPointX << " range:" << range <<"\n" 
+            // <<  robot->blob->GetBlobs()[0].left<< " right:" 
+            // << robot->blob->GetBlobs()[0].right  <<  " " 
+            // << robot->blob->GetBlobs()[0].range << " "  
+            << "pose main: " << robot->pos->GetPose().x << " " << robot->pos->GetPose().y << " rotation:" << robot->pos->GetPose().a * 180 / M_PI << "\n"               
+            << "pose secn: " << robot->pos->GetPose().x + range*sin(degree) << " " << robot->pos->GetPose().y - range*cos(degree) << " rotation:" << robot->pos->GetPose().a * 180 / M_PI << "\n" 
+            << degree
+            << std::endl;
   
+
+
+  return 0;
   //set turn speed'
   robot->pos->SetTurnSpeed(
     robot->pidturn.calculate( maxblobx /2,  centerPointX , 0.1 )
@@ -135,6 +147,8 @@ int BlobUpdate(Model *, robot_t *robot)
 // inspect the ranger data and decide what to do
 int LaserUpdate(Model *, robot_t *robot)
 {
+  return 0;
+
   if (robot->state)
     return 0;
   // get the data

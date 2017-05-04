@@ -9,7 +9,7 @@ include "sick.inc"
 # time to pause (in GUI mode) or quit (in headless mode (-g)) the simulation
 quit_time 3600 # 1 hour of simulated time
 
-paused 1
+paused 0
 
 resolution 0.02
 
@@ -17,8 +17,8 @@ resolution 0.02
 window
 (
   size [ 635 666 ] # in pixels
-  scale 27.795   # pixels per meter
-  center [ 1.210  0.622 ]
+  scale 79.302   # pixels per meter
+  center [ 10.318  0.178 ]
   rotate [ 0.000  0.000 ]
   			
   show_data 1              # 1=on 0=off
@@ -39,7 +39,7 @@ pioneer2dx
   color "red"
   # can refer to the robot by this name
   name "r0"
-  pose [ 3.599 -0.581 0.000 81.485 ] 
+  pose [ 9.995 3.054 0.000 90.00 ] 
 
   # pioneer2dx's sonars will be ranger:0 and the laser will be ranger:1
   sicklaser( pose [ 0.000 0.000 0.000 0.000 ] ) 
@@ -64,14 +64,14 @@ pioneer2dx
   color "red"
   # can refer to the robot by this name
   name "r1"
-  pose [ 3.992 -2.189 0.000 80.289 ] 
+  pose [ 9.760 0.213 0.000 90.00 ] 
 
   # pioneer2dx's sonars will be ranger:0 and the laser will be ranger:1
   sicklaser( pose [ 0.000 0.000 0.000 0.000 ] ) 
  
   # demonstrate a plugin controller, implemented in examples/ctrl/wander.cc
   # you probably should comment this out when using simple.cfg with Player
-  ctrl "wander"180
+  #ctrl "wander"
 
   # report error-free position in world coordinates
 
