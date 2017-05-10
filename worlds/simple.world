@@ -33,6 +33,27 @@ floorplan
   bitmap "bitmaps/simpleroad2.png"
 )
 
+pioneer2dx
+(
+  color "red"
+  # can refer to the robot by this name
+  name "r1"
+  pose [ 9.760 0.213 0.000 90.00 ] 
+
+  # pioneer2dx's sonars will be ranger:0 and the laser will be ranger:1
+  sicklaser( pose [ 0.000 0.000 0.000 0.000 ] ) 
+ 
+  # demonstrate a plugin controller, implemented in examples/ctrl/wander.cc
+  # you probably should comment this out when using simple.cfg with Player
+  ctrl "wander"
+
+  # report error-free position in world coordinates
+
+  localization "gps"
+  localization_origin [ 0 0 0 0 ]
+)
+
+
 
 pioneer2dx
 (
@@ -55,26 +76,10 @@ pioneer2dx
       name "blob"
       colors [ "red" "blue" "green" "cyan" "yellow" "magenta" ]  
       alwayson 1
+      fov 100
+      range 30.0
+      image [ 640 640 ]
     )
-  localization "gps"
-  localization_origin [ 0 0 0 0 ]
-)
-pioneer2dx
-(
-  color "red"
-  # can refer to the robot by this name
-  name "r1"
-  pose [ 9.760 0.213 0.000 90.00 ] 
-
-  # pioneer2dx's sonars will be ranger:0 and the laser will be ranger:1
-  sicklaser( pose [ 0.000 0.000 0.000 0.000 ] ) 
- 
-  # demonstrate a plugin controller, implemented in examples/ctrl/wander.cc
-  # you probably should comment this out when using simple.cfg with Player
-  ctrl "wander"
-
-  # report error-free position in world coordinates
-
   localization "gps"
   localization_origin [ 0 0 0 0 ]
 )

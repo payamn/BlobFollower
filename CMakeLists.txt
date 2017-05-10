@@ -5,9 +5,12 @@ cmake_minimum_required(VERSION 2.6)
 include(FindPkgConfig)
 pkg_search_module(STAGE REQUIRED stage)
 
+find_package(OpenCV REQUIRED)
+
 include_directories(
   include
   ${STAGE_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
 )
 
 link_directories(${STAGE_LIBRARY_DIRS})
@@ -16,7 +19,7 @@ set(PLUGIN_NAME mybot)
 
 # create a library module for each plugin and link libstage to each
 ADD_LIBRARY(${PLUGIN_NAME} MODULE src/my_bot.cpp src/pid.cpp)
-TARGET_LINK_LIBRARIES(${PLUGIN_NAME} ${STAGE_LIBRARIES})
+TARGET_LINK_LIBRARIES(${PLUGIN_NAME} ${STAGE_LIBRARIES} ${OpenCV_LIBRARIES})
 
 
 # delete the "lib" prefix from the plugin libraries
