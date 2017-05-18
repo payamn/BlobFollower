@@ -59,8 +59,8 @@ extern "C" int Init(Model *mod, CtrlArgs *)
 
   // robot->pidcruse = PID(cruisespeed, -cruisespeed, 0.1, 0.01, 0.5);
   if (isahead){
-    robot->pidturn.set(avoidturn*2, -avoidturn*2, 0.84, 0.041, 0.1);
-    robot->pidcruse.set(cruisespeed*4, -cruisespeed*2, -cruisespeed  , .0000, 0.000);
+    robot->pidturn.set(avoidturn*2, -avoidturn*2, avoidturn, 0.041, 0.1);
+    robot->pidcruse.set(cruisespeed*4, -cruisespeed*2, -cruisespeed  , .0100, 0.010);
   }
   // else {
   //   robot->pidturn.set(avoidturn, -avoidturn, 0.04, 0.0005, 0.000);
@@ -411,10 +411,8 @@ int LaserUpdate(Model *, robot_t *robot)
     devide *= 0.5;
     avgDestinations.x += robot->lastDestination[(posNum-i+ numberOfPosHist)%numberOfPosHist].x * devide;
     avgDestinations.y += robot->lastDestination[(posNum-i + numberOfPosHist)%numberOfPosHist].y * devide;
-    std::cout << (posNum-i+ numberOfPosHist)%numberOfPosHist  <<std::endl;
-  }
-  std::cout <<  (posNum+ numberOfPosHist-(numberOfPosHist-1))  <<std::endl;
- 
+
+  } 
   avgDestinations.x += robot->lastDestination[(posNum+numberOfPosHist-(numberOfPosHist-1))%numberOfPosHist].x * devide;
   avgDestinations.y += robot->lastDestination[(posNum + numberOfPosHist -(numberOfPosHist-1))%numberOfPosHist].y * devide;
 
@@ -444,10 +442,17 @@ int setSpeed(robot_t *robot, Stg::Pose destination){
   }
   robot->degreeD = degreeD;
   std::cout << "m: "<< m << "atan: " <<  degreeD*180 / M_PI << std::endl;
- 
+  
+  double Dturn = robot->pos->GetPose().a - degreeD;
+
+  if (Dturn >= M_PI)
+    Dturn -= M_PI*2;
+  else if (Dturn <= -M_PI)
+     Dturn += M_PI*2;
+  std::cout << "dturn: " << Dturn << std::endl;
   //set turn speed
   robot->pos->SetTurnSpeed(
-    robot->pidturn.calculate( degreeD , robot->pos->GetPose().a  , 0.01 )
+    robot->pidturn.calculate( 0 ,  Dturn , 0.01 )
   );
 
 
