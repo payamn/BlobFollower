@@ -60,7 +60,7 @@ pioneer2dx
   color "red"
   # can refer to the robot by this name
   name "r0"
-  pose [ 17.656 13.817 0.000 122.604 ] 
+  pose [ 13.737 15.087 0.000 122.604 ] 
 
   # pioneer2dx's sonars will be ranger:0 and the laser will be ranger:1
   sicklaser( pose [ 0.000 0.000 0.000 0.000 ] ) 
@@ -76,9 +76,11 @@ pioneer2dx
       name "blob"
       colors [ "red" "blue" "green" "cyan" "yellow" "magenta" ]  
       alwayson 1
-      fov 100
+      update_interval 1
+      fov 180
       range 30.0
       image [ 640 640 ]
+      pan 0
     )
   localization "gps"
   localization_origin [ 0 0 0 0 ]
