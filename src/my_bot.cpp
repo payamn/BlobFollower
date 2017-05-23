@@ -9,6 +9,7 @@
 
 
 using namespace Stg;
+bool firstTime = true;
 static const bool UseOtherRobotPose = false;
 static const bool UseLaser = false;
 static const double followdist = 4;
@@ -22,9 +23,12 @@ static const int numberOfPosHist = 40;
 int maxblobx = 80;
 static bool isahead = true;
 typedef struct {
+  Stg::Pose robotPose;
   ModelPosition *pos;
   ModelRanger *laser;
-  ModelBlobfinder *blob;
+  ModelBlobfinder *blobF;
+  ModelBlobfinder *blobB;
+
   Stg::Pose posesAvgLastOther;
   Stg::Pose* posesOther;
   int TheposesOtherNum;
@@ -40,21 +44,20 @@ typedef struct {
 
 
 int counter = 0;
-int BlobUpdate(Model *, robot_t *robot);
+int MyBlobUpdate (robot_t*robot, bool isFront);
+int BlobUpdateBack (Model *, robot_t *robot);
+int BlobUpdateFront (Model *, robot_t *robot);
 int LaserUpdate(Model *mod, robot_t *robot);
+int PoseUpdate(Model *, robot_t *robot);
 int setSpeed(robot_t *robot, Stg::Pose destination);
-int getOtherRobotPoseBlob (robot_t *robot, Stg::Pose &otherRobot);
+int getOtherRobotPoseBlob (robot_t *robot, Stg::Pose &otherRobot, ModelBlobfinder *blob, bool isFront);
 int getOtherRobotPoseLaser(const Stg::ModelRanger::Sensor& sensor,  robot_t *robot, Stg::Pose &otherRobot);
 int getDestinationBasedOnOtherObjectPoses(robot_t *robot, Stg::Pose otherRobot, Stg::Pose& avgDestinations);
 
-double getBlobBearing(robot_t *robot, double blobCoord)
+double getBlobBearing(robot_t *robot, double blobCoord, ModelBlobfinder *blob)
 {
-  return ( blobCoord * robot->blob->fov / (robot->blob->scan_width-1) - robot->blob->fov/2.0);
+  return ( blobCoord * blob->fov / (blob->scan_width-1) - blob->fov/2.0);
 
-   // return atan2(
-   //          tan(robot->blob->fov/2) * (blobCoord - (robot->blob->scan_width+1)/2) * 2, //(2.0 * centerPointX / maxblobx - 1)
-   //          robot->blob->scan_width
-   //        );
 }
 
 
@@ -74,7 +77,7 @@ extern "C" int Init(Model *mod, CtrlArgs *)
   // robot->pidcruse = PID(cruisespeed, -cruisespeed, 0.1, 0.01, 0.5);
   if (isahead){
     robot->pidturn.set(avoidturn, -avoidturn, avoidturn, 0.0100, 0.01);
-    robot->pidcruse.set(cruisespeed*2, -cruisespeed, -cruisespeed  , .0100, 0.010);
+    robot->pidcruse.set(cruisespeed*3, -cruisespeed, -cruisespeed  , .0100, 0.001);
   }
   // else {
   //   robot->pidturn.set(avoidturn, -avoidturn, 0.04, 0.0005, 0.000);
@@ -89,6 +92,7 @@ extern "C" int Init(Model *mod, CtrlArgs *)
   robot->distance = 0;
   robot->state = 0;
   robot->degreeD = 0;
+  robot->robotPose = Stg::Pose(0,0,0,0);
   robot->pos = dynamic_cast<ModelPosition *>(mod);
   if (!robot->pos) {
     PRINT_ERR("No position model given in wander controller.");
@@ -103,6 +107,7 @@ extern "C" int Init(Model *mod, CtrlArgs *)
   // {
   //   std::cout << (*it)->GetId()<< std::endl;
   // }
+  robot->pos->AddCallback( Model::CB_UPDATE, model_callback_t(PoseUpdate), robot);
   robot->pos->Subscribe(); // starts the position updates
 
 
@@ -110,26 +115,42 @@ extern "C" int Init(Model *mod, CtrlArgs *)
   robot->laser->AddCallback( Model::CB_UPDATE, model_callback_t(LaserUpdate), robot);
   robot->laser->Subscribe();
 
-
-  robot->blob = dynamic_cast<ModelBlobfinder *>(robot->pos->GetChild("blobfinder:0"));//(robot->pos->GetWorld()->GetModel("blob"));
-  if (!robot->blob)
+  robot->blobB = dynamic_cast<ModelBlobfinder *>(robot->pos->GetChild("blobfinder:0"));//(robot->pos->GetWorld()->GetModel("blob"));
+  if (!robot->blobB)
     std::cout << "error" << "\n";
-  robot->blob->AddCallback(Model::CB_UPDATE, model_callback_t(BlobUpdate), robot);
-  robot->blob->Subscribe();
+
+  robot->blobF = dynamic_cast<ModelBlobfinder *>(robot->pos->GetChild("blobfinder:1"));//(robot->pos->GetWorld()->GetModel("blob"));
+  if (!robot->blobF)
+    std::cout << "error" << "\n";
+  robot->blobB->AddCallback(Model::CB_UPDATE, model_callback_t(BlobUpdateBack), robot); // boolean parameter: is front blob detector
+  robot->blobB->Subscribe();
+
+  robot->blobF->AddCallback(Model::CB_UPDATE, model_callback_t(BlobUpdateFront), robot); // boolean parameter: is front blob detector
+  robot->blobF->Subscribe();
   return 0; // ok
 }
 
-int BlobUpdate(Model * mod, robot_t *robot)
+int calPosBasedSpeed(Stg::Pose speed, Stg::Pose &robot_pose)
+{   
+  robot_pose = Stg::Pose(robot_pose.x+speed.x, robot_pose.y+speed.y, 0, 0);
+  return 0;
+}
+
+int myBlobUpdate ( robot_t *robot, bool isFront)
 {
-  if (UseLaser)
-    return 0;
+  ModelBlobfinder *blob;
+
+  if (isFront)
+    blob = robot->blobF;
+  else
+    blob = robot->blobB;
   double speedX = 0;
   double speedY = 0;
   // no blob
   // if (counter%10 !=0)
   //   return 0;
-  maxblobx = robot->blob->scan_width;
-  std::cout << "maxhight: " << robot->blob->scan_width << std::endl;
+  maxblobx = blob->scan_width;
+  std::cout << "maxhight: " << blob->scan_width << std::endl;
 
   if (UseOtherRobotPose){
 
@@ -148,27 +169,42 @@ int BlobUpdate(Model * mod, robot_t *robot)
     setSpeed(robot,robot->lastDestination[0]);
 
   }
-  else if (!robot->blob->GetBlobs().size() ){
-    speedX = robot->posesOther[0].z;
-    speedY = robot->posesOther[0].a;
-    robot->lastDestination[0] = Stg::Pose(robot->lastDestination[0].x+speedX,robot->lastDestination[0].y+speedY,0,0);
-    setSpeed(robot,robot->lastDestination[0]);
+  else if (!blob->GetBlobs().size()){
+    return 0;
+
+    //---------------- prediction to do:
+    // if (firstTime)
+    //   return 0;
+    // Stg::Pose speed = Stg::Pose(robot->posesAvgLastOther.z, robot->posesAvgLastOther.a,0,0);
+    // // speedX = robot->posesAvgLastOther.z;
+    // // speedY = robot->posesAvgLastOther.a;
+    // Stg::Pose otherRobot = robot->posesAvgLastOther;
+    // calPosBasedSpeed(speed ,otherRobot);
+    // Stg::Pose avgDestinations;
+    // if (getDestinationBasedOnOtherObjectPoses(robot, otherRobot, avgDestinations))
+    //   return 0;
+    // ModelPosition::Waypoint wp(otherRobot, Color("red"));
+    // ((ModelPosition*)robot->otherRobot)-> waypoints.push_back(wp);
+    // std::cout << "a other robot pos: " << otherRobot.x << " "<< otherRobot.y << std::endl;
+
+    
+    // setSpeed(robot,avgDestinations);
 
   }
   else{
 
 
     Stg::Pose otherRobot;
-    getOtherRobotPoseBlob (robot, otherRobot);
+    getOtherRobotPoseBlob (robot, otherRobot, blob, isFront);
     // double x = otherRobot.x;
     // double y = otherRobot.y;
     // double x =  -range * cos(degree) * cos(robot->pos->GetPose().a) -
     //             range * sin(degree) * sin(robot->pos->GetPose().a) +
-    //             robot->pos->GetPose().x;
+    //             robot->robotPose.x;
 
     // double y =  -range * cos(degree) * sin(robot->pos->GetPose().a) +
     //             range * sin(degree) * cos(robot->pos->GetPose().a) +
-    //             robot->pos->GetPose().y;
+    //             robot->robotPose.y;
 
 
 
@@ -181,7 +217,6 @@ int BlobUpdate(Model * mod, robot_t *robot)
     //           << fabs(y - robot->otherRobot->GetGlobalPose().y) / 0.5 
     //           << std::endl;
     Stg::Pose avgDestinations;
-    std::cout << " before func" << std::endl;
     if (getDestinationBasedOnOtherObjectPoses(robot, otherRobot, avgDestinations))
       return 0;
 
@@ -210,31 +245,47 @@ int BlobUpdate(Model * mod, robot_t *robot)
     //       << std::endl;
     // }
     setSpeed(robot,avgDestinations);
-
   }
+}
 
-  
+int BlobUpdateFront(Model * mod, robot_t *robot)
+{
+  if (UseLaser)
+    return 0;
+
+  myBlobUpdate (robot, true);
+
+  return 0;
+}
+
+int BlobUpdateBack(Model * mod, robot_t *robot)
+{
+  if (UseLaser)
+    return 0;
+  myBlobUpdate (robot, false);
+
   return 0; // run again
 }
 
-int getOtherRobotPoseBlob (robot_t *robot, Stg::Pose &otherRobot){
+int getOtherRobotPoseBlob (robot_t *robot, Stg::Pose &otherRobot, ModelBlobfinder *blob, bool isFront)
+{
     
-    double f = maxblobx / tan(robot->blob->fov/2)/2;
+    double f = maxblobx / tan(blob->fov/2)/2;
     std::cout << "Focal: " << f << std::endl;
-    double range = robot->blob->GetBlobs()[0].range;
-    double centerPointX = (robot->blob->GetBlobs()[0].left + robot->blob->GetBlobs()[0].right) / 2.0;
-    double centerPointY = (robot->blob->GetBlobs()[0].top + robot->blob->GetBlobs()[0].bottom) / 2.0;
+    double range = blob->GetBlobs()[0].range;
+    double centerPointX = (blob->GetBlobs()[0].left + blob->GetBlobs()[0].right) / 2.0;
+    double centerPointY = (blob->GetBlobs()[0].top + blob->GetBlobs()[0].bottom) / 2.0;
     // double x = range / f * (centerPointX - maxblobx/2);
     // double y = range; // sqrt(range*range - x*x);
-    std::cout << "FOV: " << robot->blob->fov * 180 / M_PI << std::endl;
-    double degree = getBlobBearing(robot, centerPointX);
+    std::cout << "FOV: " << blob->fov * 180 / M_PI << std::endl;
+    double degree = getBlobBearing(robot, centerPointX, blob);
 
     cv::Mat K = cv::Mat::eye(3, 3, CV_32F);
     K.at<float>(0, 0) = K.at<float>(1, 1) = f;
 
     cv::Mat u(3, 1, CV_32F);
-    u.at<float>(0, 0) = centerPointX - robot->blob->scan_width/2;
-    u.at<float>(1, 0) = centerPointY - robot->blob->scan_height/2;
+    u.at<float>(0, 0) = centerPointX - blob->scan_width/2;
+    u.at<float>(1, 0) = centerPointY - blob->scan_height/2;
     u.at<float>(2, 0) = 1;
     u = u / cv::norm(u);
 
@@ -265,8 +316,8 @@ int getOtherRobotPoseBlob (robot_t *robot, Stg::Pose &otherRobot){
     robot_pose.at<float>(0, 1) = -sin(robot->pos->GetPose().a);
     robot_pose.at<float>(1, 0) = -robot_pose.at<float>(0, 1);
     robot_pose.at<float>(1, 1) = robot_pose.at<float>(0, 0);
-    robot_pose.at<float>(0, 2) = robot->pos->GetPose().x;
-    robot_pose.at<float>(1, 2) = robot->pos->GetPose().y;
+    robot_pose.at<float>(0, 2) = robot->robotPose.x;
+    robot_pose.at<float>(1, 2) = robot->robotPose.y;
 
     cv::Mat r1_position_global(3, 1, CV_32F);
     r1_position_global.at<float>(0, 0) = robot->otherRobot->GetGlobalPose().x;
@@ -277,8 +328,8 @@ int getOtherRobotPoseBlob (robot_t *robot, Stg::Pose &otherRobot){
 
     double exact_degree = M_PI - (
                                 atan2 (
-                                  robot->pos->GetPose().y - robot->otherRobot->GetGlobalPose().y,
-                                  robot->pos->GetPose().x - robot->otherRobot->GetGlobalPose().x
+                                  robot->robotPose.y - robot->otherRobot->GetGlobalPose().y,
+                                  robot->robotPose.x - robot->otherRobot->GetGlobalPose().x
                                   
                                 ) + robot->pos->GetPose().a);
                           
@@ -286,12 +337,17 @@ int getOtherRobotPoseBlob (robot_t *robot, Stg::Pose &otherRobot){
     // ------------------------ Estimated relative ------------------------ //
     // use exact range
     double exact_range = sqrt(
-      pow(robot->pos->GetPose().y - robot->otherRobot->GetGlobalPose().y, 2) +
-      pow(robot->pos->GetPose().x - robot->otherRobot->GetGlobalPose().x, 2)
+      pow(robot->robotPose.y - robot->otherRobot->GetGlobalPose().y, 2) +
+      pow(robot->robotPose.x - robot->otherRobot->GetGlobalPose().x, 2)
     );
-
     double relative_x_est = -range * cos(degree);
     double relative_y_est = range * sin(degree);
+    
+    if (isFront)
+    {    
+      relative_x_est *=-1;
+      relative_y_est *= -1;
+    }
 
     cv::Mat relative_est(3, 1, CV_32F);
     relative_est.at<float>(0, 0) = relative_x_est;
@@ -329,8 +385,8 @@ int getOtherRobotPoseBlob (robot_t *robot, Stg::Pose &otherRobot){
         double laser_x, laser_y;
         int laser_grid_x, laser_grid_y;
 
-        laser_x =  robot->pos->GetPose().x +  scan[i] * cos(laser_orientation);
-        laser_y =  robot->pos->GetPose().y +  scan[i] * sin(laser_orientation);
+        laser_x =  robot->robotPose.x +  scan[i] * cos(laser_orientation);
+        laser_y =  robot->robotPose.y +  scan[i] * sin(laser_orientation);
         
         // if (convertToGridCoords(laser_x, laser_y, laser_grid_x, laser_grid_y)) {
         //     continue;
@@ -362,9 +418,9 @@ int getOtherRobotPoseBlob (robot_t *robot, Stg::Pose &otherRobot){
 
 
 // inspect the ranger data and decide what to do
-bool firstTime = true;
 int laserCounter =0;
-int getDestinationBasedOnOtherObjectPoses(robot_t *robot, Stg::Pose otherRobot, Stg::Pose& avgDestinations){
+int getDestinationBasedOnOtherObjectPoses(robot_t *robot, Stg::Pose otherRobot, Stg::Pose& avgDestinations)
+{
   int posNum = robot->TheposesOtherNum % numberOfPosHist;
   double xTemp = otherRobot.x;
   double yTemp =  otherRobot.y;
@@ -419,6 +475,16 @@ int getDestinationBasedOnOtherObjectPoses(robot_t *robot, Stg::Pose otherRobot, 
   return 0;
 }
 
+int PoseUpdate(Model *, robot_t *robot)
+{
+  robot->robotPose = robot->pos->GetGlobalPose();
+  // std::cout << "velocity(x,y): " <<((Stg::Pose)robot->pos->GetGlobalVelocity()).x << " " << ((Stg::Pose)robot->pos->GetGlobalVelocity()).y << std::endl;
+  // robot->robotPose.x += ((Stg::Pose)robot->pos->GetGlobalVelocity()).x /20.;
+  // robot->robotPose.y += ((Stg::Pose)robot->pos->GetGlobalVelocity()).y /20.;
+  // ModelPosition::Waypoint wp(Stg::Pose(robot->robotPose.x,robot->robotPose.y, 0,0.), Color("yellow"));
+  // ((ModelPosition*)robot->otherRobot)-> waypoints.push_back(wp);
+  return 0;
+}
 
 
 int LaserUpdate(Model *, robot_t *robot)
@@ -441,17 +507,19 @@ int LaserUpdate(Model *, robot_t *robot)
 
 int dummyCounter=0;
 
-int setSpeed(robot_t *robot, Stg::Pose destination){
+int setSpeed(robot_t *robot, Stg::Pose destination)
+{
 
   ModelPosition::Waypoint wp(destination ,Color("blue"));
   ((ModelPosition*)robot->otherRobot)-> waypoints.push_back(wp);
-
-  double m = (destination.y - robot->pos->GetPose().y) / (destination.x - robot->pos->GetPose().x);
+  if ((destination.x - robot->robotPose.x)==0) // Avoid devide by 0
+    return 0;
+  double m = (destination.y - robot->robotPose.y) / (destination.x - robot->robotPose.x);
   double degreeD = atan(m);
 
-  if (destination.x < robot->pos->GetPose().x && destination.y > robot->pos->GetPose().y  )
+  if (destination.x < robot->robotPose.x && destination.y > robot->robotPose.y  )
     degreeD = M_PI + degreeD;  
-  else if (destination.x < robot->pos->GetPose().x && destination.y < robot->pos->GetPose().y  )
+  else if (destination.x < robot->robotPose.x && destination.y < robot->robotPose.y  )
     degreeD = -M_PI + degreeD;
 
   if (abs(degreeD -robot->degreeD) >= 180){
@@ -484,7 +552,7 @@ int setSpeed(robot_t *robot, Stg::Pose destination){
   //   );
   // }
 
-  robot->distance = sqrt(pow(destination.x- robot->pos->GetPose().x, 2) +  pow(destination.y - robot->pos->GetPose().y, 2));
+  robot->distance = sqrt(pow(destination.x- robot->robotPose.x, 2) +  pow(destination.y - robot->robotPose.y, 2));
   std::cout<< "distance: " << robot->distance << std::endl;
   double Xspeed = robot->pidcruse.calculate(0 ,robot->distance, 0.01 );
   std::cout << "Xspeed: " << Xspeed << std::endl;
