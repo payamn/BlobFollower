@@ -16,10 +16,10 @@ resolution 0.02
 # configure the GUI window
 window
 (
-  size [ 635 666 ] # in pixels
-  scale 15.689   # pixels per meter
-  center [ 0.443  0.279 ]
-  rotate [ 0.000  0.000 ]
+  size [ 1855 1056 ] # in pixels
+  scale 105.548   # pixels per meter
+  center [ 3.175  0.429 ]
+  rotate [ 0.000  21.000 ]
   			
   show_data 1              # 1=on 0=off
 )
@@ -38,7 +38,7 @@ pioneer2dx
   color "red"
   # can refer to the robot by this name
   name "r1"
-  pose [ -0.064 -1.402 0.000 90.000 ] 
+  pose [ -0.253 -0.798 0.000 9.786 ] 
 
   # pioneer2dx's sonars will be ranger:0 and the laser will be ranger:1
   sicklaser( pose [ 0.000 0.000 0.000 0.000 ] ) 
@@ -60,7 +60,7 @@ pioneer2dx
   color "red"
   # can refer to the robot by this name
   name "r0"
-  pose [ 0.000 0.000 0.000 90.000 ] 
+  pose [ 1.903 -0.184 0.000 15.161 ] 
 
   # pioneer2dx's sonars will be ranger:0 and the laser will be ranger:1
   sicklaser( pose [ 0.000 0.000 0.000 0.000 ] ) 

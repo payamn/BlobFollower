@@ -19,7 +19,9 @@ static const double avoidturn = 0.5;
 static const double minfrontdistance = 1.0; // 0.6
 static const double stopdist = 0.3;
 static const int avoidduration = 10;
-static const int numberOfPosHist = 40;
+static const int numberOfPosHist = 30;
+static const int numUpdateReferenceFrame = 30;
+
 int maxblobx = 80;
 static bool isahead = true;
 typedef struct {
@@ -28,7 +30,11 @@ typedef struct {
   ModelRanger *laser;
   ModelBlobfinder *blobF;
   ModelBlobfinder *blobB;
+  Stg::Pose prevPoseMine;
 
+  // for visualization purpose, we save the absolute pose when the origin was fixed
+  Stg::Pose robotPose_w;
+  
   Stg::Pose posesAvgLastOther;
   Stg::Pose* posesOther;
   int TheposesOtherNum;
@@ -40,6 +46,8 @@ typedef struct {
   float degreeD;
   double distance;
   int avoidcount, randcount;
+
+  int referenceLastUpdated;
 } robot_t;
 
 
@@ -53,6 +61,8 @@ int setSpeed(robot_t *robot, Stg::Pose destination);
 int getOtherRobotPoseBlob (robot_t *robot, Stg::Pose &otherRobot, ModelBlobfinder *blob, bool isFront);
 int getOtherRobotPoseLaser(const Stg::ModelRanger::Sensor& sensor,  robot_t *robot, Stg::Pose &otherRobot);
 int getDestinationBasedOnOtherObjectPoses(robot_t *robot, Stg::Pose otherRobot, Stg::Pose& avgDestinations);
+int createWaypoint(robot_t *robot, Stg::Pose, char* color);
+
 
 double getBlobBearing(robot_t *robot, double blobCoord, ModelBlobfinder *blob)
 {
@@ -92,7 +102,8 @@ extern "C" int Init(Model *mod, CtrlArgs *)
   robot->distance = 0;
   robot->state = 0;
   robot->degreeD = 0;
-  robot->robotPose = Stg::Pose(0,0,0,0);
+  robot->referenceLastUpdated = 0;
+  
   robot->pos = dynamic_cast<ModelPosition *>(mod);
   if (!robot->pos) {
     PRINT_ERR("No position model given in wander controller.");
@@ -110,6 +121,9 @@ extern "C" int Init(Model *mod, CtrlArgs *)
   robot->pos->AddCallback( Model::CB_UPDATE, model_callback_t(PoseUpdate), robot);
   robot->pos->Subscribe(); // starts the position updates
 
+  robot->robotPose = Stg::Pose(0, 0, 0, 0);
+  robot->prevPoseMine = Stg::Pose(0, 0, 0, 0);
+  robot->robotPose_w = robot->pos->GetPose();
 
   robot->laser = (ModelRanger*)mod->GetChild("ranger:1");
   robot->laser->AddCallback( Model::CB_UPDATE, model_callback_t(LaserUpdate), robot);
@@ -195,7 +209,10 @@ int myBlobUpdate ( robot_t *robot, bool isFront)
 
 
     Stg::Pose otherRobot;
-    getOtherRobotPoseBlob (robot, otherRobot, blob, isFront);
+    if (getOtherRobotPoseBlob (robot, otherRobot, blob, isFront))
+    {
+      return 0;
+    }
     // double x = otherRobot.x;
     // double y = otherRobot.y;
     // double x =  -range * cos(degree) * cos(robot->pos->GetPose().a) -
@@ -218,7 +235,9 @@ int myBlobUpdate ( robot_t *robot, bool isFront)
     //           << std::endl;
     Stg::Pose avgDestinations;
     if (getDestinationBasedOnOtherObjectPoses(robot, otherRobot, avgDestinations))
+    {
       return 0;
+    }
 
     // ModelPosition::Waypoint wp(Stg::Pose(x,y,robot->otherRobot->GetGlobalPose().z,0.),
     //                                          Color("green"));
@@ -267,12 +286,90 @@ int BlobUpdateBack(Model * mod, robot_t *robot)
   return 0; // run again
 }
 
+cv::Mat pose2TransformationMatrix(Stg::Pose origin)
+{
+  cv::Mat pose = cv::Mat::eye(3, 3, CV_32F);
+  pose.at<float>(0, 0) = cos(origin.a);
+  pose.at<float>(0, 1) = -sin(origin.a);
+  pose.at<float>(1, 0) = -pose.at<float>(0, 1);
+  pose.at<float>(1, 1) = pose.at<float>(0, 0);
+  pose.at<float>(0, 2) = origin.x;
+  pose.at<float>(1, 2) = origin.y;
+
+  return pose;
+}
+
+cv::Mat pose2HomgeneousVector(Stg::Pose pose)
+{
+  cv::Mat homogeneousVector(3, 1, CV_32F);
+  homogeneousVector.at<float>(0, 0) = pose.x;
+  homogeneousVector.at<float>(1, 0) = pose.y;
+  homogeneousVector.at<float>(2, 0) = 1.0f;
+
+  return homogeneousVector;
+}
+
+Stg::Pose homogeneousVector2Pose(cv::Mat homogeneousVector)
+{
+  assert(homogeneousVector.rows==3 && homogeneousVector.cols==1);
+  return Stg::Pose( homogeneousVector.at<float>(0, 0),  homogeneousVector.at<float>(1, 0), 0, 0 );
+}
+
+Stg::meters_t getRangeFromLaser(robot_t *robot, double startAngle, double endAngle)
+{
+  // get the data
+  std::vector<Stg::meters_t> scan = robot->laser->GetSensors()[0].ranges;
+  // make the orientation of laser scan counter-clockwise (+ve) to the robot
+  std::reverse(scan.begin(), scan.end());
+
+  double angleIncrement = robot->laser->GetSensors()[0].fov/(double)(robot->laser->GetSensors()[0].sample_count-1);
+  size_t startIdx = round(startAngle/angleIncrement);
+  size_t endIdx = round(endAngle/angleIncrement);
+
+  // debug
+  // std::cout << "Non saturated laser" << std::endl;
+  // for (size_t i=0; i<scan.size(); i++)
+  // {
+  //   if (scan[i]<8)
+  //   {
+  //     std::cout << i << " ";
+  //   }
+  // }
+  // std::cout << std::endl;
+
+  // std::cout << "Start: " << startIdx << " End: " << endIdx << std::endl;
+  
+  std::vector<Stg::meters_t> validScan;
+  for (size_t i=startIdx; i!=endIdx+1; i++)
+  {
+    i = i % robot->laser->GetSensors()[0].sample_count;
+    if (scan[i] < robot->laser->GetSensors()[0].range.max)
+    {
+      // std::cout << scan[i] << std::endl;
+      validScan.push_back(scan[i]);
+    }
+  }
+  
+  if (validScan.size() == 0)
+  {
+    std::cout << "No valid scan" << std::endl;
+    return 0;
+  }
+
+  // median
+  size_t medianIdx = validScan.size()/2;
+  std::nth_element(validScan.begin(), validScan.begin()+medianIdx, validScan.end());
+  return validScan[medianIdx];
+  // min
+  // return *(std::min_element(validScan.begin(), validScan.end()));
+
+}
+
+
 int getOtherRobotPoseBlob (robot_t *robot, Stg::Pose &otherRobot, ModelBlobfinder *blob, bool isFront)
 {
-    
-    double f = maxblobx / tan(blob->fov/2)/2;
-    std::cout << "Focal: " << f << std::endl;
-    double range = blob->GetBlobs()[0].range;
+    cv::Mat robot_pose = pose2TransformationMatrix(robot->prevPoseMine);
+
     double centerPointX = (blob->GetBlobs()[0].left + blob->GetBlobs()[0].right) / 2.0;
     double centerPointY = (blob->GetBlobs()[0].top + blob->GetBlobs()[0].bottom) / 2.0;
     // double x = range / f * (centerPointX - maxblobx/2);
@@ -280,50 +377,39 @@ int getOtherRobotPoseBlob (robot_t *robot, Stg::Pose &otherRobot, ModelBlobfinde
     std::cout << "FOV: " << blob->fov * 180 / M_PI << std::endl;
     double degree = getBlobBearing(robot, centerPointX, blob);
 
-    cv::Mat K = cv::Mat::eye(3, 3, CV_32F);
-    K.at<float>(0, 0) = K.at<float>(1, 1) = f;
+    // double range = blob->GetBlobs()[0].range;
+    double blobStartAngle = getBlobBearing(robot, blob->GetBlobs()[0].left, blob);
+    double blobEndAngle = getBlobBearing(robot, blob->GetBlobs()[0].right, blob);
+    // the start of laser is at the back of robot
+    double laserStartAngle = isFront ? M_PI + blobStartAngle : blobStartAngle ;
+    double laserEndAngle = isFront ? M_PI + blobEndAngle: blobEndAngle;
+    
+    laserStartAngle = atan2(sin(laserStartAngle), cos(laserStartAngle));
+    laserEndAngle = atan2(sin(laserEndAngle), cos(laserEndAngle));
+    laserStartAngle = laserStartAngle>=0 ? laserStartAngle : laserStartAngle + 2*M_PI;
+    laserEndAngle = laserEndAngle>=0 ? laserEndAngle : laserEndAngle + 2*M_PI;
 
-    cv::Mat u(3, 1, CV_32F);
-    u.at<float>(0, 0) = centerPointX - blob->scan_width/2;
-    u.at<float>(1, 0) = centerPointY - blob->scan_height/2;
-    u.at<float>(2, 0) = 1;
-    u = u / cv::norm(u);
-
-
-    // std::cout << "Error: " 
-    //           // << "(" << degree * 180 / M_PI << " VS " << exact_degree * 180 / M_PI << "), "
-    //           << "(" << r1_position_local.at<float>(0, 0) << ", " << r1_position_local.at<float>(1, 0) << ") VS "
-    //           << "(" << relative_x_est << ", " << relative_y_est << "): "
-    //           << "(" << fabs(relative_x_est - r1_position_local.at<float>(0, 0)) / 0.5 << ", " 
-    //           << fabs(relative_y_est - r1_position_local.at<float>(1, 0)) / 0.5 << ")"
+    // debug
+    // std::cout << " Blob Start: " << blobStartAngle * 180 / M_PI 
+    //           << " Blob End: " << blobEndAngle * 180 / M_PI 
+    //           << std::endl
+    //           << " Laser Start: " << laserStartAngle * 180 / M_PI 
+    //           << " Laser End: " << laserEndAngle * 180 / M_PI 
     //           << std::endl;
 
-    // cv::Mat u_inv = K.inv() * u;
-    // cv::Mat vertical(3, 1, CV_32F);
-    // vertical.at<float>(0, 0) = vertical.at<float>(1, 0) = 0;
-    // vertical.at<float>(2, 0) = 1;
-    // double degree = acos(u_inv.dot(vertical) / norm(u_inv));
-    
-    
-    // double degree = robot->blob->fov / sqrt( pow(robot->blob->scan_height, 2) + pow(robot->blob->scan_width, 2) ) * (centerPointX - maxblobx/2);
+    double range = getRangeFromLaser(robot, laserStartAngle, laserEndAngle);
+    if (range == 0)
+    {
+      return 1;
+    }
 
-    //asin(1.0 / sqrt(3) * (2.0 * centerPointX / maxblobx - 1));
-   
+    // std::cout << "Estimated range: " << range
+    //           << " Actual Range: " << blob->GetBlobs()[0].range
+    //           << std::endl;
+
+    
     // ------------------------ Exact relative ------------------------ //
-    
-    cv::Mat robot_pose = cv::Mat::eye(3, 3, CV_32F);
-    robot_pose.at<float>(0, 0) = cos(robot->pos->GetPose().a);
-    robot_pose.at<float>(0, 1) = -sin(robot->pos->GetPose().a);
-    robot_pose.at<float>(1, 0) = -robot_pose.at<float>(0, 1);
-    robot_pose.at<float>(1, 1) = robot_pose.at<float>(0, 0);
-    robot_pose.at<float>(0, 2) = robot->robotPose.x;
-    robot_pose.at<float>(1, 2) = robot->robotPose.y;
-
-    cv::Mat r1_position_global(3, 1, CV_32F);
-    r1_position_global.at<float>(0, 0) = robot->otherRobot->GetGlobalPose().x;
-    r1_position_global.at<float>(1, 0) = robot->otherRobot->GetGlobalPose().y;
-    r1_position_global.at<float>(2, 0) = 1;
-
+    cv::Mat r1_position_global = pose2HomgeneousVector( robot->otherRobot->GetGlobalPose() );
     cv::Mat r1_position_local = robot_pose.inv() * r1_position_global;
 
     double exact_degree = M_PI - (
@@ -355,11 +441,18 @@ int getOtherRobotPoseBlob (robot_t *robot, Stg::Pose &otherRobot, ModelBlobfinde
     relative_est.at<float>(2, 0) = 1;
 
     std::cout << "Exact: " << r1_position_local.t() << ", Estimated: " << relative_est.t() << std::endl;
-    std::cout << "Exact range: " << exact_range << ", Estimated: " << range << std::endl;
+    // std::cout << "Exact range: " << exact_range << ", Estimated: " << range << std::endl;
 
     cv::Mat global_est = robot_pose * relative_est;
-    otherRobot = Stg::Pose(global_est.at<float>(0, 0), global_est.at<float>(1, 0),0,0); 
-    ModelPosition::Waypoint wp(Stg::Pose(otherRobot.x,otherRobot.y, robot->otherRobot->GetGlobalPose().z,0.), Color("green"));
+    
+    otherRobot = Stg::Pose(global_est.at<float>(0, 0), global_est.at<float>(1, 0),0,0);
+    
+    // for visualization purpose, plot other robot estimate wrt r0 (using its absolute position/orientation)
+    // transformation from r0 to world frame
+    cv::Mat T_w_r0 = pose2TransformationMatrix(robot->robotPose_w);
+    Stg::Pose poseOther_w = homogeneousVector2Pose(T_w_r0 * pose2HomgeneousVector(otherRobot));
+    ModelPosition::Waypoint wp(poseOther_w, Color("green"));
+
     ((ModelPosition*)robot->otherRobot)-> waypoints.push_back(wp);
     return 0;
 }
@@ -416,6 +509,35 @@ int getOtherRobotPoseBlob (robot_t *robot, Stg::Pose &otherRobot, ModelBlobfinde
     return 0;
 }
 
+Stg::Pose filterWithPriority(Stg::Pose* poseVector , int posNum)
+{
+  Stg::Pose avgDestinations= Stg::Pose(0,0,0,0);
+  double devide = 1;
+  for (int i=0 ; i<numberOfPosHist-1 ; i++)
+  {
+    devide *= 0.5;
+    avgDestinations.x += poseVector[(posNum-i+ numberOfPosHist)%numberOfPosHist].x * devide;
+    avgDestinations.y += poseVector[(posNum-i + numberOfPosHist)%numberOfPosHist].y * devide;
+  }
+  avgDestinations.x += poseVector[(posNum+numberOfPosHist-(numberOfPosHist-1))%numberOfPosHist].x * devide;
+  avgDestinations.y += poseVector[(posNum + numberOfPosHist -(numberOfPosHist-1))%numberOfPosHist].y * devide;
+
+  return avgDestinations;
+}
+
+Stg::Pose filterWithoutPriority(Stg::Pose* poseVector)
+{
+  Stg::Pose avgDestinations= Stg::Pose(0,0,0,0);
+  for (int i=0 ; i<numberOfPosHist ; i++)
+  {
+    avgDestinations.x += poseVector[i].x;
+    avgDestinations.y += poseVector[i].y;
+  }
+  avgDestinations.x = avgDestinations.x / (double)numberOfPosHist;
+  avgDestinations.y = avgDestinations.y / (double)numberOfPosHist;
+  return avgDestinations;
+}
+
 
 // inspect the ranger data and decide what to do
 int laserCounter =0;
@@ -435,57 +557,144 @@ int getDestinationBasedOnOtherObjectPoses(robot_t *robot, Stg::Pose otherRobot, 
   }
   robot->posesOther[posNum] = Stg::Pose(xTemp,yTemp,0,0);
 
+
+
   //-----------------------gitting pos history average-------------------------------
-  double sumX = 0.0;
-  double sumY = 0.0;
-  for (int i=0; i<numberOfPosHist ; i++){
-    sumX += robot->posesOther[i].x;
-    sumY += robot->posesOther[i].y; 
-  }
+  
+  Stg::Pose historyAVG = filterWithPriority(robot->posesOther, posNum); 
 
-  double x = sumX/(double)numberOfPosHist;
-  double y = sumY/(double)numberOfPosHist;
+  // double sumX = 0.0;
+  // double sumY = 0.0;
+  // double devider = 1;
+  // for (int i=0; i<numberOfPosHist - 1 ; i++){
+  //   devider *= 0.5;
+  //   sumX += robot->posesOther[i].x * devider;
+  //   sumY += robot->posesOther[i].y * devider; 
+  // }
+  // sumX += robot->posesOther[numberOfPosHist-1].x * devider;
+  // sumY += robot->posesOther[numberOfPosHist-1].y * devider; 
 
-  double speedX = x - robot->posesAvgLastOther.x; 
-  double speedY = y - robot->posesAvgLastOther.y;        
+  // double x = sumX;
+  // double y = sumY;
+
+
+  double speedX = historyAVG.x - robot->posesAvgLastOther.x; 
+  double speedY = historyAVG.y - robot->posesAvgLastOther.y;        
    if (speedX == 0 && speedY == 0){
     speedX = robot->posesAvgLastOther.z;
     speedY = robot->posesAvgLastOther.a;
   }
-  robot->posesAvgLastOther = Stg::Pose(x,y,speedX,speedY);
+  robot->posesAvgLastOther = Stg::Pose(historyAVG.x,historyAVG.y,speedX,speedY);
   robot->posesOther[posNum] = Stg::Pose(xTemp,yTemp,0,0);
   if (speedX*speedX + speedY*speedY == 0){   //to avoid devide by 0
     return 1;
   }
   double speedXU = speedX / sqrt(speedX*speedX + speedY*speedY);
   double speedYU = speedY / sqrt(speedX*speedX + speedY*speedY);
-  robot->lastDestination[posNum] = Stg::Pose(x+speedX*2 + speedXU*followdist, y+speedY*2 + speedYU*followdist, 0.,0.);
+  robot->lastDestination[posNum] = Stg::Pose(historyAVG.x+speedX*2 + speedXU*followdist, historyAVG.y+speedY*2 + speedYU*followdist, 0.,0.);
   //-----------------------gitting dest history average focus on last destination---------
-  avgDestinations= Stg::Pose(0,0,0,0);
-  double devide = 1;
-  for (int i=0 ; i<numberOfPosHist-1 ; i++){
-    devide *= 0.5;
-    avgDestinations.x += robot->lastDestination[(posNum-i+ numberOfPosHist)%numberOfPosHist].x * devide;
-    avgDestinations.y += robot->lastDestination[(posNum-i + numberOfPosHist)%numberOfPosHist].y * devide;
 
-  } 
-  avgDestinations.x += robot->lastDestination[(posNum+numberOfPosHist-(numberOfPosHist-1))%numberOfPosHist].x * devide;
-  avgDestinations.y += robot->lastDestination[(posNum + numberOfPosHist -(numberOfPosHist-1))%numberOfPosHist].y * devide;
+  avgDestinations = filterWithoutPriority(robot->lastDestination);
+
+  // avgDestinations= Stg::Pose(0,0,0,0);
+  // double devide = 1;
+  // for (int i=0 ; i<numberOfPosHist-1 ; i++){
+  //   devide *= 0.5;
+  //   avgDestinations.x += robot->lastDestination[(posNum-i+ numberOfPosHist)%numberOfPosHist].x * devide;
+  //   avgDestinations.y += robot->lastDestination[(posNum-i + numberOfPosHist)%numberOfPosHist].y * devide;
+
+  // } 
+  // avgDestinations.x += robot->lastDestination[(posNum+numberOfPosHist-(numberOfPosHist-1))%numberOfPosHist].x * devide;
+  // avgDestinations.y += robot->lastDestination[(posNum + numberOfPosHist -(numberOfPosHist-1))%numberOfPosHist].y * devide;
   robot->TheposesOtherNum ++;
   return 0;
 }
 
+int FiterReferenceFrameUpdate(robot_t *robot)
+{
+  // transformation from frame 2 (current robot pose) to frame 1 (previous robot pose)
+  cv::Mat T12 = pose2TransformationMatrix(robot->robotPose);
+  // transformation from frame 2 to frame 1
+  cv::Mat T21 = T12.inv();
+  cv::Mat homogeneousVectorF1;
+  cv::Mat homogeneousVectorF2;
+
+  // for visualization purpose, plot other robot estimate wrt r0 (using its absolute position/orientation)
+  // transformation from r0 to world frame
+  cv::Mat T_w_r0 = pose2TransformationMatrix(robot->pos->GetPose());
+  for (int i=0 ; i< numberOfPosHist ; i++){
+
+    homogeneousVectorF1 = pose2HomgeneousVector(robot->lastDestination[i]);
+    homogeneousVectorF2 = T21 * homogeneousVectorF1;
+    robot->lastDestination[i] = homogeneousVector2Pose(homogeneousVectorF2);
+    Stg::Pose poseOther_w = homogeneousVector2Pose(T_w_r0 * pose2HomgeneousVector(robot->lastDestination[i]));
+    createWaypoint(robot, poseOther_w, "cyan");
+
+    homogeneousVectorF1 = pose2HomgeneousVector(robot->posesOther[i]);
+    homogeneousVectorF2 = T21 * homogeneousVectorF1;
+    robot->posesOther[i] = homogeneousVector2Pose(homogeneousVectorF2);
+    std::cout << "filter reffrence points: " << robot->posesOther[i].x << " " << robot->posesOther[i].y;
+    
+    poseOther_w = homogeneousVector2Pose(T_w_r0 * pose2HomgeneousVector(robot->posesOther[i]));
+    createWaypoint(robot, poseOther_w, "red");
+
+  }
+
+
+}
+
+
+
 int PoseUpdate(Model *, robot_t *robot)
 {
-  robot->robotPose = robot->pos->GetGlobalPose();
-  // std::cout << "velocity(x,y): " <<((Stg::Pose)robot->pos->GetGlobalVelocity()).x << " " << ((Stg::Pose)robot->pos->GetGlobalVelocity()).y << std::endl;
-  // robot->robotPose.x += ((Stg::Pose)robot->pos->GetGlobalVelocity()).x /20.;
-  // robot->robotPose.y += ((Stg::Pose)robot->pos->GetGlobalVelocity()).y /20.;
-  // ModelPosition::Waypoint wp(Stg::Pose(robot->robotPose.x,robot->robotPose.y, 0,0.), Color("yellow"));
-  // ((ModelPosition*)robot->otherRobot)-> waypoints.push_back(wp);
+  // robot->robotPose = robot->pos->GetPose();
+  // return 0;
+  // std::cout << "velocity(x,y): " <<((Stg::Pose)robot->pos->GetVelocity()).x << " " << ((Stg::Pose)robot->pos->GetGlobalVelocity()).y << std::endl;
+  
+  if (robot->referenceLastUpdated >= numUpdateReferenceFrame)
+  {
+    ((ModelPosition*)robot->otherRobot)-> waypoints.clear();
+
+    FiterReferenceFrameUpdate(robot);
+
+    robot->robotPose = Stg::Pose(0, 0, 0, 0);
+    robot->prevPoseMine = Stg::Pose(0, 0, 0, 0);
+    robot->referenceLastUpdated = 0;
+
+    // just for visualization of waypoints
+    robot->robotPose_w = robot->pos->GetPose();
+  }
+  else
+  {
+    double omega = ((Stg::Pose)robot->pos->GetVelocity()).a;
+    double v = ((Stg::Pose)robot->pos->GetVelocity()).x;
+
+    std::cout << "Y velocity: " << ((Stg::Pose)robot->pos->GetVelocity()).y << std::endl;
+
+    robot->robotPose.x +=  v * cos(robot->prevPoseMine.a) / 10. ;
+    robot->robotPose.y +=  v * sin(robot->prevPoseMine.a) / 10.;
+    
+    robot->prevPoseMine = robot->robotPose;
+    robot->robotPose.a += omega / 10. ;
+    robot->robotPose.a = atan2(sin(robot->robotPose.a), cos(robot->robotPose.a));
+  }
+
+  robot->referenceLastUpdated++;
+
+  // for visualization purpose, plot other robot estimate wrt r0 (using its absolute position/orientation)
+  // transformation from r0 to world frame
+  cv::Mat T_w_r0 = pose2TransformationMatrix(robot->robotPose_w);
+  Stg::Pose robotPose_w = homogeneousVector2Pose(T_w_r0 * pose2HomgeneousVector(robot->robotPose));
+  ModelPosition::Waypoint wp(robotPose_w, Color("yellow"));
+  ((ModelPosition*)robot->otherRobot)-> waypoints.push_back(wp);
   return 0;
 }
 
+int createWaypoint(robot_t *robot, Stg::Pose pose, char* color)
+{
+    ModelPosition::Waypoint wp(Stg::Pose(pose.x ,pose.y , 0.0, pose.a), Color(color));
+   ((ModelPosition*)robot->otherRobot)-> waypoints.push_back(wp);
+}
 
 int LaserUpdate(Model *, robot_t *robot)
 {
@@ -509,9 +718,13 @@ int dummyCounter=0;
 
 int setSpeed(robot_t *robot, Stg::Pose destination)
 {
-
-  ModelPosition::Waypoint wp(destination ,Color("blue"));
+  // for visualization purpose, plot other robot estimate wrt r0 (using its absolute position/orientation)
+  // transformation from r0 to world frame
+  cv::Mat T_w_r0 = pose2TransformationMatrix(robot->robotPose_w);
+  Stg::Pose destination_w = homogeneousVector2Pose(T_w_r0 * pose2HomgeneousVector(destination));
+  ModelPosition::Waypoint wp(destination_w ,Color("blue"));
   ((ModelPosition*)robot->otherRobot)-> waypoints.push_back(wp);
+  
   if ((destination.x - robot->robotPose.x)==0) // Avoid devide by 0
     return 0;
   double m = (destination.y - robot->robotPose.y) / (destination.x - robot->robotPose.x);
@@ -529,7 +742,7 @@ int setSpeed(robot_t *robot, Stg::Pose destination)
   robot->degreeD = degreeD;
   std::cout << "m: "<< m << "atan: " <<  degreeD*180 / M_PI << std::endl;
   
-  double Dturn = robot->pos->GetPose().a - degreeD;
+  double Dturn = robot->robotPose.a - degreeD;
 
   if (Dturn >= M_PI)
     Dturn -= M_PI*2;
@@ -540,6 +753,7 @@ int setSpeed(robot_t *robot, Stg::Pose destination)
   double Tspeed = robot->pidturn.calculate( 0 ,  Dturn , 0.01 );
   std::cout << "Tspeed: " << Tspeed << std::endl;
   robot->pos->SetTurnSpeed(Tspeed);
+
   // dummyCounter++;
 
   // if (dummyCounter%2)
