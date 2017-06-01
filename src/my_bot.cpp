@@ -306,7 +306,7 @@ cv::Mat pose2HomgeneousVector(Stg::Pose pose)
   homogeneousVector.at<float>(1, 0) = pose.y;
   homogeneousVector.at<float>(2, 0) = 1.0f;
 
-  return homogeneousVector;
+  return homogeneousVector.clone();
 }
 
 Stg::Pose homogeneousVector2Pose(cv::Mat homogeneousVector)
@@ -561,7 +561,7 @@ int getDestinationBasedOnOtherObjectPoses(robot_t *robot, Stg::Pose otherRobot, 
 
   //-----------------------gitting pos history average-------------------------------
   
-  Stg::Pose historyAVG = filterWithPriority(robot->posesOther, posNum); 
+  Stg::Pose historyAVG = filterWithoutPriority(robot->posesOther); 
 
   // double sumX = 0.0;
   // double sumY = 0.0;
