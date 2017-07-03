@@ -1,12 +1,17 @@
 #include <limits> include <vector> include <iostream> include <cassert>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <ctime>
+
 #include <opencv2/core.hpp>
 #include <opencv2/opencv.hpp>
 #include "pid.h"
 
 #include "my_bot.h"
+#include "kalman.hpp"
 
+#define NUM_STATES 9
 
 using namespace Stg;
 bool firstTime = true;
@@ -19,8 +24,33 @@ static const double avoidturn = 0.5;
 static const double minfrontdistance = 1.0; // 0.6
 static const double stopdist = 0.3;
 static const int avoidduration = 10;
-static const int numberOfPosHist = 30;
+static const int numberOfPosHist = 20;
 static const int numUpdateReferenceFrame = 30;
+
+static const float Q0 = 0.05;
+static const float Q1 = 0.05;
+static const float Q2 = 0.09;
+static const float Q3 = 0.15;
+static const float Q4 = 0.19;
+static const float Q5 = 1;
+static const float Q6 = 1;
+static const float Q7 = 0.25;
+static const float Q8 = 0.25;
+
+static const float R0 = 0.05;
+static const float R1 = 0.02;
+static const float R2 = 0.1;
+static const float R3 = 0.1;
+
+static const float P0 = 0.01;
+static const float P1 = 0.01;
+static const float P2 = 0.01;
+static const float P3 = 0.01;
+static const float P4 = 0.01;
+static const float P5 = 1;
+static const float P6 = 1;
+static const float P7 = 0.5;
+static const float P8 = 0.5;
 
 int maxblobx = 80;
 static bool isahead = true;
@@ -31,12 +61,17 @@ typedef struct {
   ModelBlobfinder *blobF;
   ModelBlobfinder *blobB;
   Stg::Pose prevPoseMine;
+  Stg::Pose relative_pose_other;
 
   // for visualization purpose, we save the absolute pose when the origin was fixed
   Stg::Pose robotPose_w;
-  
+  cv::Mat kalmanFilterState;
   Stg::Pose posesAvgLastOther;
   Stg::Pose* posesOther;
+  
+  Stg::Pose poseOtherPrev;
+  bool isOtherPoseValid;
+
   int TheposesOtherNum;
   Stg::Pose* lastDestination;
   int state; // 1 means blob detected, 0 not detected
@@ -63,6 +98,7 @@ int getOtherRobotPoseLaser(const Stg::ModelRanger::Sensor& sensor,  robot_t *rob
 int getDestinationBasedOnOtherObjectPoses(robot_t *robot, Stg::Pose otherRobot, Stg::Pose& avgDestinations);
 int createWaypoint(robot_t *robot, Stg::Pose, char* color);
 
+KalmanFilter *kalmanFilter;
 
 double getBlobBearing(robot_t *robot, double blobCoord, ModelBlobfinder *blob)
 {
@@ -81,14 +117,47 @@ extern "C" int Init(Model *mod, CtrlArgs *)
       args->worldfile.c_str(),
       args->cmdline.c_str() );
   */
+  srand((unsigned)time(0));
 
+  cv::Mat Q = cv::Mat::zeros(NUM_STATES, NUM_STATES, CV_32F);
+  Q.at<float>(0, 0) = Q0;
+  Q.at<float>(1, 1) = Q1;
+  Q.at<float>(2, 2) = Q2;
+  Q.at<float>(3, 3) = Q3;
+  Q.at<float>(4, 4) = Q4;
+  Q.at<float>(5, 5) = Q5;
+  Q.at<float>(6, 6) = Q6;
+  Q.at<float>(7, 7) = Q7;
+  Q.at<float>(8, 8) = Q8;
+
+  cv::Mat R = cv::Mat::zeros(4, 4, CV_32F);
+  R.at<float>(0, 0) = R0;
+  R.at<float>(1, 1) = R1;
+  R.at<float>(2, 2) = R2;
+  R.at<float>(3, 3) = R3;
+
+  cv::Mat P = cv::Mat::eye(NUM_STATES, NUM_STATES, CV_32F);
+  P.at<float>(0, 0) = P0;
+  P.at<float>(1, 1) = P1;
+  P.at<float>(2, 2) = P2;
+  P.at<float>(3, 3) = P3;
+  P.at<float>(4, 4) = P4;
+  P.at<float>(5, 5) = P5;
+  P.at<float>(6, 6) = P6;
+  P.at<float>(7, 7) = P7;
+  P.at<float>(8, 8) = P8;
+
+  kalmanFilter = new KalmanFilter(0.1, Q, R, P);
+  
   robot_t *robot = new robot_t();
+  robot->isOtherPoseValid = false;
 
   // robot->pidcruse = PID(cruisespeed, -cruisespeed, 0.1, 0.01, 0.5);
   if (isahead){
     robot->pidturn.set(avoidturn, -avoidturn, avoidturn, 0.0100, 0.01);
     robot->pidcruse.set(cruisespeed*3, -cruisespeed, -cruisespeed  , .0100, 0.001);
   }
+
   // else {
   //   robot->pidturn.set(avoidturn, -avoidturn, 0.04, 0.0005, 0.000);
   //   robot->pidcruse.set(0, cruisespeed, cruisespeed*4, 1.001, 0.001);
@@ -103,6 +172,7 @@ extern "C" int Init(Model *mod, CtrlArgs *)
   robot->state = 0;
   robot->degreeD = 0;
   robot->referenceLastUpdated = 0;
+  robot->kalmanFilterState = cv::Mat(NUM_STATES, 1, CV_32F);
   
   robot->pos = dynamic_cast<ModelPosition *>(mod);
   if (!robot->pos) {
@@ -164,7 +234,7 @@ int myBlobUpdate ( robot_t *robot, bool isFront)
   // if (counter%10 !=0)
   //   return 0;
   maxblobx = blob->scan_width;
-  std::cout << "maxhight: " << blob->scan_width << std::endl;
+  // std::cout << "maxhight: " << blob->scan_width << std::endl;
 
   if (UseOtherRobotPose){
 
@@ -233,11 +303,11 @@ int myBlobUpdate ( robot_t *robot, bool isFront)
     //           << fabs(x - robot->otherRobot->GetGlobalPose().x) / 0.5 << ", " 
     //           << fabs(y - robot->otherRobot->GetGlobalPose().y) / 0.5 
     //           << std::endl;
-    Stg::Pose avgDestinations;
-    if (getDestinationBasedOnOtherObjectPoses(robot, otherRobot, avgDestinations))
-    {
-      return 0;
-    }
+    // Stg::Pose avgDestinations;
+    // if (getDestinationBasedOnOtherObjectPoses(robot, otherRobot, avgDestinations))
+    // {
+    //   return 0;
+    // }
 
     // ModelPosition::Waypoint wp(Stg::Pose(x,y,robot->otherRobot->GetGlobalPose().z,0.),
     //                                          Color("green"));
@@ -263,7 +333,7 @@ int myBlobUpdate ( robot_t *robot, bool isFront)
     //       << "speed secn: " << speedX << " " << speedY << "\n" 
     //       << std::endl;
     // }
-    setSpeed(robot,avgDestinations);
+    // setSpeed(robot,avgDestinations);
   }
 }
 
@@ -374,7 +444,7 @@ int getOtherRobotPoseBlob (robot_t *robot, Stg::Pose &otherRobot, ModelBlobfinde
     double centerPointY = (blob->GetBlobs()[0].top + blob->GetBlobs()[0].bottom) / 2.0;
     // double x = range / f * (centerPointX - maxblobx/2);
     // double y = range; // sqrt(range*range - x*x);
-    std::cout << "FOV: " << blob->fov * 180 / M_PI << std::endl;
+    // std::cout << "FOV: " << blob->fov * 180 / M_PI << std::endl;
     double degree = getBlobBearing(robot, centerPointX, blob);
 
     // double range = blob->GetBlobs()[0].range;
@@ -440,20 +510,23 @@ int getOtherRobotPoseBlob (robot_t *robot, Stg::Pose &otherRobot, ModelBlobfinde
     relative_est.at<float>(1, 0) = relative_y_est;
     relative_est.at<float>(2, 0) = 1;
 
-    std::cout << "Exact: " << r1_position_local.t() << ", Estimated: " << relative_est.t() << std::endl;
+    robot->relative_pose_other = Stg::Pose(relative_x_est,relative_y_est,0,0);
+    // std::cout << "Exact: " << r1_position_local.t() << ", Estimated: " << relative_est.t() << std::endl;
     // std::cout << "Exact range: " << exact_range << ", Estimated: " << range << std::endl;
 
     cv::Mat global_est = robot_pose * relative_est;
     
     otherRobot = Stg::Pose(global_est.at<float>(0, 0), global_est.at<float>(1, 0),0,0);
-    
+    robot->poseOtherPrev = otherRobot;
+    robot->isOtherPoseValid = true;
+
     // for visualization purpose, plot other robot estimate wrt r0 (using its absolute position/orientation)
     // transformation from r0 to world frame
     cv::Mat T_w_r0 = pose2TransformationMatrix(robot->robotPose_w);
     Stg::Pose poseOther_w = homogeneousVector2Pose(T_w_r0 * pose2HomgeneousVector(otherRobot));
-    ModelPosition::Waypoint wp(poseOther_w, Color("green"));
+    // ModelPosition::Waypoint wp(poseOther_w, Color("green"));
 
-    ((ModelPosition*)robot->otherRobot)-> waypoints.push_back(wp);
+    // ((ModelPosition*)robot->otherRobot)-> waypoints.push_back(wp);
     return 0;
 }
 
@@ -578,9 +651,12 @@ int getDestinationBasedOnOtherObjectPoses(robot_t *robot, Stg::Pose otherRobot, 
   // double y = sumY;
 
 
-  double speedX = historyAVG.x - robot->posesAvgLastOther.x; 
-  double speedY = historyAVG.y - robot->posesAvgLastOther.y;        
-   if (speedX == 0 && speedY == 0){
+  // double speedX = historyAVG.x - robot->posesAvgLastOther.x; 
+  // double speedY = historyAVG.y - robot->posesAvgLastOther.y;        
+  double speedX = robot->kalmanFilterState.at<float>(7,0)*.1; 
+  double speedY = robot->kalmanFilterState.at<float>(8,0)*.1;        
+  
+  if (speedX == 0 && speedY == 0){
     speedX = robot->posesAvgLastOther.z;
     speedY = robot->posesAvgLastOther.a;
   }
@@ -633,7 +709,7 @@ int FiterReferenceFrameUpdate(robot_t *robot)
     homogeneousVectorF1 = pose2HomgeneousVector(robot->posesOther[i]);
     homogeneousVectorF2 = T21 * homogeneousVectorF1;
     robot->posesOther[i] = homogeneousVector2Pose(homogeneousVectorF2);
-    std::cout << "filter reffrence points: " << robot->posesOther[i].x << " " << robot->posesOther[i].y;
+    // std::cout << "filter reffrence points: " << robot->posesOther[i].x << " " << robot->posesOther[i].y;
     
     poseOther_w = homogeneousVector2Pose(T_w_r0 * pose2HomgeneousVector(robot->posesOther[i]));
     createWaypoint(robot, poseOther_w, "red");
@@ -650,12 +726,24 @@ int PoseUpdate(Model *, robot_t *robot)
   // robot->robotPose = robot->pos->GetPose();
   // return 0;
   // std::cout << "velocity(x,y): " <<((Stg::Pose)robot->pos->GetVelocity()).x << " " << ((Stg::Pose)robot->pos->GetGlobalVelocity()).y << std::endl;
-  
+  if (!robot->isOtherPoseValid)
+  {
+    return 0;
+  }
+
+  cv::Mat state;
   if (robot->referenceLastUpdated >= numUpdateReferenceFrame)
   {
     ((ModelPosition*)robot->otherRobot)-> waypoints.clear();
-
     FiterReferenceFrameUpdate(robot);
+
+    // transform the velocity to the new reference frame
+    cv::Mat oldState = kalmanFilter->state();
+    float oldVelOther_x = oldState.at<float>(7, 0);
+    float oldVelOther_y = oldState.at<float>(8, 0);
+
+    float newVelOther_x = cos(robot->robotPose.a) * oldVelOther_x + sin(robot->robotPose.a) * oldVelOther_y;
+    float newVelOther_y = -sin(robot->robotPose.a) * oldVelOther_x + cos(robot->robotPose.a) * oldVelOther_y;
 
     robot->robotPose = Stg::Pose(0, 0, 0, 0);
     robot->prevPoseMine = Stg::Pose(0, 0, 0, 0);
@@ -663,22 +751,77 @@ int PoseUpdate(Model *, robot_t *robot)
 
     // just for visualization of waypoints
     robot->robotPose_w = robot->pos->GetPose();
+
+    // reset the filter
+    cv::Mat newState = cv::Mat::zeros(9, 1, CV_32F);
+    newState.at<float>(3, 0) = oldState.at<float>(3, 0);
+    newState.at<float>(4, 0) = oldState.at<float>(4, 0);
+    newState.at<float>(5, 0) = robot->relative_pose_other.x;
+    newState.at<float>(6, 0) = robot->relative_pose_other.y;
+    newState.at<float>(7, 0) = newVelOther_x;
+    newState.at<float>(8, 0) = newVelOther_y;
+
+    kalmanFilter->init(0, newState);
+
+    state = newState;
   }
   else
   {
-    double omega = ((Stg::Pose)robot->pos->GetVelocity()).a;
-    double v = ((Stg::Pose)robot->pos->GetVelocity()).x;
+    double omega_odom = ((Stg::Pose)robot->pos->GetVelocity()).a + (std::rand()/(double)RAND_MAX - 0.5)*sqrt(R1)*2;
+    double v_odom = ((Stg::Pose)robot->pos->GetVelocity()).x + (std::rand()/(double)RAND_MAX - 0.5)*sqrt(R0)*2;
 
-    std::cout << "Y velocity: " << ((Stg::Pose)robot->pos->GetVelocity()).y << std::endl;
+    double omega_cmd_vel = ((Stg::Pose)robot->pos->GetVelocity()).a + (std::rand()/(double)RAND_MAX - 0.5)*sqrt(Q4)*2;
+    double v_cmd_vel = ((Stg::Pose)robot->pos->GetVelocity()).x + (std::rand()/(double)RAND_MAX - 0.5)*sqrt(Q3)*2;
 
-    robot->robotPose.x +=  v * cos(robot->prevPoseMine.a) / 10. ;
-    robot->robotPose.y +=  v * sin(robot->prevPoseMine.a) / 10.;
+    // measurement
+    cv::Mat y = cv::Mat(4, 1, CV_32F);
+    y.at<float>(0, 0) = v_odom;
+    y.at<float>(1, 0) = omega_odom;
+    y.at<float>(2, 0) = robot->poseOtherPrev.x;
+    y.at<float>(3, 0) = robot->poseOtherPrev.y;
+    // y.at<float>(2, 0) = robot->relative_pose_other.x;
+    // y.at<float>(3, 0) = robot->relative_pose_other.y;
+
+    // control input
+    cv::Mat u = cv::Mat(2, 1, CV_32F);
+    u.at<float>(0, 0) = v_cmd_vel;
+    u.at<float>(1, 0) = omega_cmd_vel;
+
+    if (!kalmanFilter->isInitialized())
+    {
+      cv::Mat initState = cv::Mat::zeros(NUM_STATES, 1, CV_32F);
+      initState.at<float>(5, 0) = robot->poseOtherPrev.x;
+      initState.at<float>(6, 0) = robot->poseOtherPrev.y;
+      kalmanFilter->init(0, cv::Mat::zeros(NUM_STATES, 1 ,CV_32F));
+    }
     
-    robot->prevPoseMine = robot->robotPose;
-    robot->robotPose.a += omega / 10. ;
+    kalmanFilter->update(y, 0.1, u);
+
+    state = kalmanFilter->state();
+
+    robot->robotPose.x = state.at<float>(0, 0);
+    robot->robotPose.y = state.at<float>(1, 0);
+    robot->robotPose.a = state.at<float>(2, 0);
     robot->robotPose.a = atan2(sin(robot->robotPose.a), cos(robot->robotPose.a));
+
+    robot->prevPoseMine = robot->robotPose;
+    
+    // double omega = ((Stg::Pose)robot->pos->GetVelocity()).a;
+    // double v = ((Stg::Pose)robot->pos->GetVelocity()).x;
+
+    // std::cout << "Y velocity: " << ((Stg::Pose)robot->pos->GetVelocity()).y << std::endl;
+
+    // robot->robotPose.x +=  v * cos(robot->prevPoseMine.a) / 10. ;
+    // robot->robotPose.y +=  v * sin(robot->prevPoseMine.a) / 10.;
+    
+    // robot->prevPoseMine = robot->robotPose;
+    // robot->robotPose.a += omega / 10. ;
+    // robot->robotPose.a = atan2(sin(robot->robotPose.a), cos(robot->robotPose.a));
   }
 
+ 
+
+  robot->kalmanFilterState = state;
   robot->referenceLastUpdated++;
 
   // for visualization purpose, plot other robot estimate wrt r0 (using its absolute position/orientation)
@@ -687,6 +830,21 @@ int PoseUpdate(Model *, robot_t *robot)
   Stg::Pose robotPose_w = homogeneousVector2Pose(T_w_r0 * pose2HomgeneousVector(robot->robotPose));
   ModelPosition::Waypoint wp(robotPose_w, Color("yellow"));
   ((ModelPosition*)robot->otherRobot)-> waypoints.push_back(wp);
+
+  cv::Mat otherRobotPose_r0(3, 1, CV_32F);
+  otherRobotPose_r0.at<float>(0, 0) = state.at<float>(5, 0);
+  otherRobotPose_r0.at<float>(1, 0) = state.at<float>(6, 0);
+  otherRobotPose_r0.at<float>(2, 0) = 1;
+
+  Stg::Pose avgDestinations;
+  if (getDestinationBasedOnOtherObjectPoses(robot, Stg::Pose(state.at<float>(5, 0),state.at<float>(6, 0),0,0), avgDestinations)) // will set avg destination
+    return 0;
+  setSpeed(robot, avgDestinations);
+
+  
+  ModelPosition::Waypoint wp2(homogeneousVector2Pose(T_w_r0 * otherRobotPose_r0), Color("green"));
+  ((ModelPosition*)robot->otherRobot)-> waypoints.push_back(wp2);
+  
   return 0;
 }
 
@@ -736,11 +894,11 @@ int setSpeed(robot_t *robot, Stg::Pose destination)
     degreeD = -M_PI + degreeD;
 
   if (abs(degreeD -robot->degreeD) >= 180){
-    std::cout << "degreed + .: " << degreeD -robot->degreeD <<std::endl;
+    // std::cout << "degreed + .: " << degreeD -robot->degreeD <<std::endl;
     degreeD = robot->degreeD;
   }
   robot->degreeD = degreeD;
-  std::cout << "m: "<< m << "atan: " <<  degreeD*180 / M_PI << std::endl;
+  // std::cout << "m: "<< m << "atan: " <<  degreeD*180 / M_PI << std::endl;
   
   double Dturn = robot->robotPose.a - degreeD;
 
@@ -748,10 +906,10 @@ int setSpeed(robot_t *robot, Stg::Pose destination)
     Dturn -= M_PI*2;
   else if (Dturn <= -M_PI)
      Dturn += M_PI*2;
-  std::cout << "dturn: " << Dturn << std::endl;
+  // std::cout << "dturn: " << Dturn << std::endl;
   //set turn speed
   double Tspeed = robot->pidturn.calculate( 0 ,  Dturn , 0.01 );
-  std::cout << "Tspeed: " << Tspeed << std::endl;
+  // std::cout << "Tspeed: " << Tspeed << std::endl;
   robot->pos->SetTurnSpeed(Tspeed);
 
   // dummyCounter++;
@@ -767,9 +925,9 @@ int setSpeed(robot_t *robot, Stg::Pose destination)
   // }
 
   robot->distance = sqrt(pow(destination.x- robot->robotPose.x, 2) +  pow(destination.y - robot->robotPose.y, 2));
-  std::cout<< "distance: " << robot->distance << std::endl;
+  // std::cout<< "distance: " << robot->distance << std::endl;
   double Xspeed = robot->pidcruse.calculate(0 ,robot->distance, 0.01 );
-  std::cout << "Xspeed: " << Xspeed << std::endl;
+  // std::cout << "Xspeed: " << Xspeed << std::endl;
   robot->pos->SetXSpeed(Xspeed);
   // robot->pos->SetXSpeed(0.4);
 
