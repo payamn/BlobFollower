@@ -9,6 +9,7 @@
 #include <stdexcept>
 
 #include "kalman.hpp"
+#include "utils.hpp"
 
 /**
  * Our state(x): x, y, theta, x_dot, y_dot
@@ -16,10 +17,10 @@
  * Our measurement (y): odom (v, omega)
  */
 KalmanFilter::KalmanFilter(
-    double dt,
-    const cv::Mat& Q,
-    const cv::Mat& R,
-    const cv::Mat& P)
+    double dt, // time between previous and current
+    const cv::Mat& Q, // uncertainty in prediction model
+    const cv::Mat& R, // uncertainty in measurement
+    const cv::Mat& P) // error covariance of the state vector
   : Q(Q), R(R), P0(P),
     m(4), n(9), dt(dt), initialized(false),
     I(cv::Mat::eye(n, n, CV_32F)), x_hat(cv::Mat(n, 1, CV_32F)), x_hat_new(cv::Mat(n, 1, CV_32F))
@@ -27,6 +28,8 @@ KalmanFilter::KalmanFilter(
   C = cv::Mat::zeros(m, n, CV_32F);
   C.at<float>(0, 3) = 1;
   C.at<float>(1, 4) = 1;
+  C.at<float>(2, 5) = 1;
+  C.at<float>(3, 6) = 1;
 }
 
 KalmanFilter::KalmanFilter() {}
@@ -91,18 +94,55 @@ void KalmanFilter::update(const cv::Mat& y, const cv::Mat& u) {
   // P_red = A_red*P_red*A_red.t() + Q_red;
   // K = P_red*C_red.t()*(C_red*P_red*C_red.t() + R).inv();
 
+  /**
+   *
+   * Our measurement: the absolute pose of the person depends on the relative pose given by blob detection as well as the robot pose, which is part of our state
+   * Hence, the uncertainty of both the relative pose and robot pose should be included in the measurement update
+   * The uncertainty in blob detection is constant ( R(2:, 2:) ) while the uncertainty in robot pose depends on the Kalman Filter state error covariance
+   */
+  float x_rel = y.at<float>(2, 0);
+  float y_rel = y.at<float>(3, 0);
+
+  // the jacobian of the measurement model (only absolute person position) with respect to robot pose
+  cv::Mat J_r = cv::Mat::zeros(2, 3, CV_32F); // 3 for x, y and theta of robot
+  J_r.at<float>(0, 0) = 1;
+  J_r.at<float>(1, 1) = 1;
+  J_r.at<float>(0, 2) = -x_rel * sinTheta - y_rel * cosTheta;
+  J_r.at<float>(1, 2) = x_rel * cosTheta - y_rel * sinTheta;
+
+  std::cout << "J_r" << std::endl;
+
+  // the jacobian of the measurement model (only absolute person position) with respect to relative person position
+  cv::Mat J_rel(2, 2, CV_32F);
+  J_rel.at<float>(0, 0) = cosTheta;
+  J_rel.at<float>(0, 1) = -sinTheta;
+  J_rel.at<float>(1, 0) = sinTheta;
+  J_rel.at<float>(1, 1) = cosTheta;
+
+  std::cout << "J_rel" << std::endl;
+
+  cv::Mat R_full = cv::Mat::zeros(m, m, CV_32F);
+  // the ones corresponding to odometry go as it is
+  R.rowRange(0, 2).colRange(0, 2).copyTo(R_full.rowRange(0, 2).colRange(0, 2));
+  std::cout << "R1" << std::endl;
+  // the ones corresponding to absolute person position (sum of propagated covariance of relative position and robot pose)
+  cv::Mat propagated_covariance = J_rel * R.rowRange(2, 4).colRange(2, 4) * J_rel.t() + J_r * P.rowRange(0, 3).colRange(0, 3) * J_r.t();
+  propagated_covariance.copyTo(R_full.rowRange(2, 4).colRange(2, 4));
+  std::cout << "R2" << std::endl; 
+
   P = A*P*A.t() + Q;
-  K = P*C.t()*(C*P*C.t() + R).inv();
+  K = P*C.t()*(C*P*C.t() + R_full).inv();
   
-  cv::Mat h(m, 1, CV_32F);
-  h.at<float>(0, 0) = x_hat_new.at<float>(3, 0);
-  h.at<float>(1, 0) = x_hat_new.at<float>(4, 0);
+  std::cout << "K: " << std::endl;
+  // cv::Mat h(m, 1, CV_32F);
+  // h.at<float>(0, 0) = x_hat_new.at<float>(3, 0);
+  // h.at<float>(1, 0) = x_hat_new.at<float>(4, 0);
   // when our measurement is relative pose
   // h.at<float>(2, 0) = cosTheta*x_p + sinTheta*y_p - (cosTheta*x_r + sinTheta * y_r) * x_p;
   // h.at<float>(3, 0) = -sinTheta*x_p + cosTheta*y_p + (sinTheta* x_r - cosTheta*y_r) * y_p;
   // when our measurement is absolute pose
-  h.at<float>(2, 0) = x_p;
-  h.at<float>(3, 0) = y_p;
+  // h.at<float>(2, 0) = x_p;
+  // h.at<float>(3, 0) = y_p;
 
   // std::cout << "y: " << y.t() << " h: " << h.t() << std::endl;
   // x_red += K * (y - h);
@@ -110,7 +150,18 @@ void KalmanFilter::update(const cv::Mat& y, const cv::Mat& u) {
   // x_red.copyTo(x_hat.rowRange(0, 7));
   // P_red.copyTo(P.rowRange(0, 7).colRange(0, 7));
   
-  x_hat_new += K * (y - h);
+  // the x_hat should be replaced by x_hat_new in real robot case
+  cv::Mat y_homogeneous = cv::Mat::ones(3, 1, CV_32F);
+  y.rowRange(2, 4).copyTo(y_homogeneous.rowRange(0, 2));
+  cv::Mat y_absolute_homogeneous = xytheta2TransformationMatrix(x_hat.rowRange(0, 3)) * y_homogeneous;
+  std::cout << "y transformation" << std::endl;
+
+  cv::Mat y_final(m, 1, CV_32F);
+  y.rowRange(0, 2).copyTo(y_final.rowRange(0, 2));
+  y_absolute_homogeneous.rowRange(0, 2).copyTo(y_final.rowRange(2, 4));
+  
+  x_hat_new += K * (y_final - C*x_hat_new);
+  std::cout << "x_hat_new" << std::endl;
   P = (I - K*C)*P;
   x_hat = x_hat_new;
 
@@ -147,10 +198,6 @@ void KalmanFilter::update(const cv::Mat& y, double dt, const cv::Mat& u) {
 
   A.at<float>(5, 7) = A.at<float>(6, 8) = dt;
 
-  C.at<float>(0, 3) = 1;
-  C.at<float>(1, 4) = 1;
-  C.at<float>(2, 5) = 1;
-  C.at<float>(3, 6) = 1;
   // C.at<float>(2, 0) = -cosTheta*x_p;
   // C.at<float>(2, 1) = -sinTheta*x_p;
   // C.at<float>(2, 2) = -sinTheta*x_p + cosTheta*y_p - (-sinTheta*x_r+cosTheta*y_r) * x_p;

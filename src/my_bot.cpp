@@ -10,47 +10,12 @@
 
 #include "my_bot.h"
 #include "kalman.hpp"
-
+#include "utils.hpp"
+#include "config.h"
 #define NUM_STATES 9
 
+//propagate uncertenty in robot pose to the person pose
 using namespace Stg;
-bool firstTime = true;
-static const bool UseOtherRobotPose = false;
-static const bool UseLaser = false;
-static const double followdist = 4;
-static const double cruisespeed = 0.4;
-static const double avoidspeed = 0.05;
-static const double avoidturn = 0.5;
-static const double minfrontdistance = 1.0; // 0.6
-static const double stopdist = 0.3;
-static const int avoidduration = 10;
-static const int numberOfPosHist = 20;
-static const int numUpdateReferenceFrame = 30;
-
-static const float Q0 = 0.05;
-static const float Q1 = 0.05;
-static const float Q2 = 0.09;
-static const float Q3 = 0.15;
-static const float Q4 = 0.19;
-static const float Q5 = 1;
-static const float Q6 = 1;
-static const float Q7 = 0.25;
-static const float Q8 = 0.25;
-
-static const float R0 = 0.05;
-static const float R1 = 0.02;
-static const float R2 = 0.1;
-static const float R3 = 0.1;
-
-static const float P0 = 0.01;
-static const float P1 = 0.01;
-static const float P2 = 0.01;
-static const float P3 = 0.01;
-static const float P4 = 0.01;
-static const float P5 = 1;
-static const float P6 = 1;
-static const float P7 = 0.5;
-static const float P8 = 0.5;
 
 int maxblobx = 80;
 static bool isahead = true;
@@ -65,7 +30,7 @@ typedef struct {
 
   // for visualization purpose, we save the absolute pose when the origin was fixed
   Stg::Pose robotPose_w;
-  cv::Mat kalmanFilterState;
+  KalmanFilter *kalmanFilter;
   Stg::Pose posesAvgLastOther;
   Stg::Pose* posesOther;
   
@@ -98,7 +63,7 @@ int getOtherRobotPoseLaser(const Stg::ModelRanger::Sensor& sensor,  robot_t *rob
 int getDestinationBasedOnOtherObjectPoses(robot_t *robot, Stg::Pose otherRobot, Stg::Pose& avgDestinations);
 int createWaypoint(robot_t *robot, Stg::Pose, char* color);
 
-KalmanFilter *kalmanFilter;
+
 
 double getBlobBearing(robot_t *robot, double blobCoord, ModelBlobfinder *blob)
 {
@@ -118,7 +83,7 @@ extern "C" int Init(Model *mod, CtrlArgs *)
       args->cmdline.c_str() );
   */
   srand((unsigned)time(0));
-
+  std::cout << "start init" << std::endl;
   cv::Mat Q = cv::Mat::zeros(NUM_STATES, NUM_STATES, CV_32F);
   Q.at<float>(0, 0) = Q0;
   Q.at<float>(1, 1) = Q1;
@@ -147,7 +112,7 @@ extern "C" int Init(Model *mod, CtrlArgs *)
   P.at<float>(7, 7) = P7;
   P.at<float>(8, 8) = P8;
 
-  kalmanFilter = new KalmanFilter(0.1, Q, R, P);
+  
   
   robot_t *robot = new robot_t();
   robot->isOtherPoseValid = false;
@@ -172,8 +137,9 @@ extern "C" int Init(Model *mod, CtrlArgs *)
   robot->state = 0;
   robot->degreeD = 0;
   robot->referenceLastUpdated = 0;
-  robot->kalmanFilterState = cv::Mat(NUM_STATES, 1, CV_32F);
-  
+  std::cout << "before kalman init" << std::endl;
+  robot->kalmanFilter = new KalmanFilter(0.1, Q, R, P);
+  std::cout << "after kalamn init" << std::endl;
   robot->pos = dynamic_cast<ModelPosition *>(mod);
   if (!robot->pos) {
     PRINT_ERR("No position model given in wander controller.");
@@ -354,35 +320,6 @@ int BlobUpdateBack(Model * mod, robot_t *robot)
   myBlobUpdate (robot, false);
 
   return 0; // run again
-}
-
-cv::Mat pose2TransformationMatrix(Stg::Pose origin)
-{
-  cv::Mat pose = cv::Mat::eye(3, 3, CV_32F);
-  pose.at<float>(0, 0) = cos(origin.a);
-  pose.at<float>(0, 1) = -sin(origin.a);
-  pose.at<float>(1, 0) = -pose.at<float>(0, 1);
-  pose.at<float>(1, 1) = pose.at<float>(0, 0);
-  pose.at<float>(0, 2) = origin.x;
-  pose.at<float>(1, 2) = origin.y;
-
-  return pose;
-}
-
-cv::Mat pose2HomgeneousVector(Stg::Pose pose)
-{
-  cv::Mat homogeneousVector(3, 1, CV_32F);
-  homogeneousVector.at<float>(0, 0) = pose.x;
-  homogeneousVector.at<float>(1, 0) = pose.y;
-  homogeneousVector.at<float>(2, 0) = 1.0f;
-
-  return homogeneousVector.clone();
-}
-
-Stg::Pose homogeneousVector2Pose(cv::Mat homogeneousVector)
-{
-  assert(homogeneousVector.rows==3 && homogeneousVector.cols==1);
-  return Stg::Pose( homogeneousVector.at<float>(0, 0),  homogeneousVector.at<float>(1, 0), 0, 0 );
 }
 
 Stg::meters_t getRangeFromLaser(robot_t *robot, double startAngle, double endAngle)
@@ -652,9 +589,11 @@ int getDestinationBasedOnOtherObjectPoses(robot_t *robot, Stg::Pose otherRobot, 
 
 
   // double speedX = historyAVG.x - robot->posesAvgLastOther.x; 
-  // double speedY = historyAVG.y - robot->posesAvgLastOther.y;        
-  double speedX = robot->kalmanFilterState.at<float>(7,0)*.1; 
-  double speedY = robot->kalmanFilterState.at<float>(8,0)*.1;        
+  // double speedY = historyAVG.y - robot->posesAvgLastOther.y; 
+  std::cout << "line 620" << std::endl;   
+  double speedX = robot->kalmanFilter->state().at<float>(7,0)*.1; 
+  double speedY = robot->kalmanFilter->state().at<float>(8,0)*.1;        
+  std::cout << "line 623" << std::endl;   
   
   if (speedX == 0 && speedY == 0){
     speedX = robot->posesAvgLastOther.z;
@@ -738,10 +677,12 @@ int PoseUpdate(Model *, robot_t *robot)
     FiterReferenceFrameUpdate(robot);
 
     // transform the velocity to the new reference frame
-    cv::Mat oldState = kalmanFilter->state();
+    std::cout << "line 707" << std::endl;   
+    cv::Mat oldState = robot->kalmanFilter->state();
     float oldVelOther_x = oldState.at<float>(7, 0);
     float oldVelOther_y = oldState.at<float>(8, 0);
-
+    std::cout << "line 711" << std::endl;   
+  
     float newVelOther_x = cos(robot->robotPose.a) * oldVelOther_x + sin(robot->robotPose.a) * oldVelOther_y;
     float newVelOther_y = -sin(robot->robotPose.a) * oldVelOther_x + cos(robot->robotPose.a) * oldVelOther_y;
 
@@ -760,8 +701,10 @@ int PoseUpdate(Model *, robot_t *robot)
     newState.at<float>(6, 0) = robot->relative_pose_other.y;
     newState.at<float>(7, 0) = newVelOther_x;
     newState.at<float>(8, 0) = newVelOther_y;
-
-    kalmanFilter->init(0, newState);
+    std::cout << "line 731" << std::endl;   
+  
+    robot->kalmanFilter->init(0, newState);
+    std::cout << "line 734" << std::endl;   
 
     state = newState;
   }
@@ -777,27 +720,27 @@ int PoseUpdate(Model *, robot_t *robot)
     cv::Mat y = cv::Mat(4, 1, CV_32F);
     y.at<float>(0, 0) = v_odom;
     y.at<float>(1, 0) = omega_odom;
-    y.at<float>(2, 0) = robot->poseOtherPrev.x;
-    y.at<float>(3, 0) = robot->poseOtherPrev.y;
-    // y.at<float>(2, 0) = robot->relative_pose_other.x;
-    // y.at<float>(3, 0) = robot->relative_pose_other.y;
+    y.at<float>(2, 0) = robot->relative_pose_other.x + (std::rand()/(double)RAND_MAX - 0.5)*sqrt(R2)*2;
+    y.at<float>(3, 0) = robot->relative_pose_other.y + (std::rand()/(double)RAND_MAX - 0.5)*sqrt(R3)*2;
 
     // control input
     cv::Mat u = cv::Mat(2, 1, CV_32F);
     u.at<float>(0, 0) = v_cmd_vel;
     u.at<float>(1, 0) = omega_cmd_vel;
+    std::cout << "line 759" << std::endl;   
 
-    if (!kalmanFilter->isInitialized())
+    if (!robot->kalmanFilter->isInitialized())
     {
       cv::Mat initState = cv::Mat::zeros(NUM_STATES, 1, CV_32F);
       initState.at<float>(5, 0) = robot->poseOtherPrev.x;
       initState.at<float>(6, 0) = robot->poseOtherPrev.y;
-      kalmanFilter->init(0, cv::Mat::zeros(NUM_STATES, 1 ,CV_32F));
+      robot->kalmanFilter->init(0, cv::Mat::zeros(NUM_STATES, 1 ,CV_32F));
     }
     
-    kalmanFilter->update(y, 0.1, u);
+    robot->kalmanFilter->update(y, 0.1, u);
 
-    state = kalmanFilter->state();
+    state = robot->kalmanFilter->state();
+    std::cout << "line 772" << std::endl;   
 
     robot->robotPose.x = state.at<float>(0, 0);
     robot->robotPose.y = state.at<float>(1, 0);
@@ -820,8 +763,6 @@ int PoseUpdate(Model *, robot_t *robot)
   }
 
  
-
-  robot->kalmanFilterState = state;
   robot->referenceLastUpdated++;
 
   // for visualization purpose, plot other robot estimate wrt r0 (using its absolute position/orientation)

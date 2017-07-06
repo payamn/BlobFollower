@@ -16,12 +16,14 @@ include_directories(
 link_directories(${STAGE_LIBRARY_DIRS})
 
 set(PLUGIN_NAME mybot)
+SET(GCC_COVERAGE_COMPILE_FLAGS "-ggdb")
 
 # create a library module for each plugin and link libstage to each
 ADD_LIBRARY(${PLUGIN_NAME} MODULE 
 	src/my_bot.cpp 
 	src/pid.cpp
 	src/kalman.cpp
+	src/utils.cpp
 )
 
 TARGET_LINK_LIBRARIES(${PLUGIN_NAME} ${STAGE_LIBRARIES} ${OpenCV_LIBRARIES})
